@@ -47,6 +47,19 @@ class RBY1ModelConfig:
     cpp_joint_names: tuple[str, ...]
     mobility_dof: int
     reference_wheel_target: tuple[float, ...]
+    # Wheel/collision family RBY1Robot configures ("a" differential, "m" mecanum).
+    base_model: str = ""
+    # The base USD already carries the gripper bodies and finger joints (v1.3: the
+    # end effector is not detachable), so --gripper drives them without mounting
+    # a gripper asset.
+    integrated_gripper: bool = False
+    # Sign of the finger-1 travel that opens the gripper: the v1.2 gripper opens
+    # at -0.05 m, the v1.3 URDF finger joints open at +0.05 m.
+    finger_open_sign: float = -1.0
+
+    def __post_init__(self):
+        if not self.base_model:
+            object.__setattr__(self, "base_model", self.model)
 
 
 _BODY_JOINT_NAMES = (
@@ -115,6 +128,18 @@ RBY1_MODEL_CONFIGS = {
         cpp_joint_names=("wheel_fr", "wheel_fl", "wheel_rr", "wheel_rl", *_BODY_JOINT_NAMES),
         mobility_dof=4,
         reference_wheel_target=(0.5, -0.5, -0.5, 0.5),
+    ),
+    # Model M v1.3: WY/WP/WR wrist modules and a built-in end effector (EE_GR_TF).
+    "m_v1.3": RBY1ModelConfig(
+        model="m_v1.3",
+        base_usd_file_name="model_v_1_3_m.usd",
+        modular_gripper_supported=False,
+        cpp_joint_names=("wheel_fr", "wheel_fl", "wheel_rr", "wheel_rl", *_BODY_JOINT_NAMES),
+        mobility_dof=4,
+        reference_wheel_target=(0.5, -0.5, -0.5, 0.5),
+        base_model="m",
+        integrated_gripper=True,
+        finger_open_sign=1.0,
     ),
 }
 
@@ -277,7 +302,7 @@ class RBY1Task(BaseTask):
         self.gripper_name = _validate_gripper_name(gripper_name) if gripper_enabled else DEFAULT_GRIPPER_NAME
         self.gripper_asset_config: Optional[GripperAssetConfig] = None
 
-        if self.gripper_enabled:
+        if self.gripper_enabled and not self.model_config.integrated_gripper:
             if not self.model_config.modular_gripper_supported:
                 raise RuntimeError(
                     f"[RBY1Task] model '{self.robot_model}' does not support modular gripper attachment."
@@ -357,7 +382,7 @@ class RBY1Task(BaseTask):
             name="RBY1",
             position=np.array([0.0, 0.0, 0.0]),
             orientation=np.array([1.0, 0.0, 0.0, 0.0]),
-            robot_model=self.robot_model,
+            robot_model=self.model_config.base_model,
         )
         self.robot = scene.add(self.rby_robot)
         self.rby_robot.set_joint_properties(scene.stage)
@@ -630,7 +655,8 @@ class RBY1Task(BaseTask):
                     joint_indices=self.gripper_command_indices,
                 )
             elif simulation_time < 8.0:
-                gripper_target = np.array([[-0.05, -0.05]], dtype=np.float32)
+                open_m = self.model_config.finger_open_sign * 0.05
+                gripper_target = np.array([[open_m, open_m]], dtype=np.float32)
                 self.robot._articulation_view.set_joint_position_targets(
                     positions=gripper_target,
                     joint_indices=self.gripper_command_indices,

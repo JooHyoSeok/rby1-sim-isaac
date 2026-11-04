@@ -64,6 +64,19 @@ The default launch uses the no-gripper base USD. Additional arguments after
 `--gripper-name <name>`, and `--no-sim-gripper`. A gripper can also be selected
 and enabled with the `GRIPPER_NAME` environment variable.
 
+#### Model M v1.3
+
+`--model m_v1.3` loads `assets/model_v_1_3_m.usd` (WY/WP/WR wrist modules, built
+from the v1.2 asset and rby1-sdk `models/rby1m/urdf/model_v1.3.urdf`). Its end
+effector is not detachable: the gripper bodies and finger joints are part of the
+robot USD, so `--gripper` drives them directly instead of mounting an
+`assets/gripper/` asset. The v1.3 finger joints open at +0.05 m (v1.2: -0.05 m);
+the `rb_gripper` server handles the sign per model.
+
+```bash
+./docker/run.sh --image <m image> --model m_v1.3 --gripper
+```
+
 ### Run options
 
 | Environment / argument | Default | Meaning |

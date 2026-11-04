@@ -116,11 +116,16 @@ class Simulation:
         self.gripper_server = None
         if self.gripper_enabled:
             from gripper_servers import create_gripper_server
+            from rby1_task import RBY1_MODEL_CONFIGS
+            server_kwargs = {}
+            if self.gripper_name == "rb_gripper":
+                server_kwargs["open_sign"] = RBY1_MODEL_CONFIGS[self.robot_model].finger_open_sign
             self.gripper_server = create_gripper_server(
                 self.gripper_name,
                 cmd_bind_port=sim_gripper_cmd_port,
                 state_send_host=sim_gripper_state_host,
                 state_send_port=sim_gripper_state_port,
+                **server_kwargs,
             )
             if use_sim_gripper:
                 self.gripper_server.start()
@@ -473,8 +478,8 @@ def _build_argparser():
     # image sets (A/M -> a/m), so the a/m images each load their own USD asset
     # without requiring an explicit --model flag. Can still be overridden.
     default_model = os.environ.get("ROBOT_MODEL_NAME", "m").strip().lower() or "m"
-    p.add_argument("--model", type=str.lower, choices=("m", "a"), default=default_model,
-                   help="RBY1 model selection: m or a (default from ROBOT_MODEL_NAME env)")
+    p.add_argument("--model", type=str.lower, choices=("m", "a", "m_v1.3"), default=default_model,
+                   help="RBY1 model selection: m, a or m_v1.3 (default from ROBOT_MODEL_NAME env)")
     p.add_argument("--udp", action="store_true",
                help="Enable rby1-sdk UDP bridge")
     p.add_argument("--state-ip", default=ROBOT_STATE_HOST,

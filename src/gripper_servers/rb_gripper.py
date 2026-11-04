@@ -28,19 +28,20 @@ RB_GRIPPER_HOME_MIN_RAD: Final[float] = -0.785398
 RB_GRIPPER_HOME_MAX_RAD: Final[float] = +0.785398
 RB_GRIPPER_HOMING_STEP_RAD: Final[float] = 0.1
 
-# URDF finger prismatic joint travel: lower=-0.05 m (open), upper=0.0 m (closed).
+# Finger prismatic joint travel. The v1.2 gripper URDF opens at -0.05 m (closed at
+# 0.0 m); the v1.3 built-in gripper opens at +0.05 m, selected with ``open_sign``.
 RB_GRIPPER_FINGER_TRAVEL_M: Final[float] = 0.05
 
 
-def closeness_to_finger_meter(closeness: float) -> float:
-    """0 (open) -> -0.05 m, 1 (closed) -> 0.0 m."""
+def closeness_to_finger_meter(closeness: float, open_sign: float = -1.0) -> float:
+    """0 (open) -> open_sign * 0.05 m, 1 (closed) -> 0.0 m."""
     c = max(0.0, min(1.0, float(closeness)))
-    return -RB_GRIPPER_FINGER_TRAVEL_M * (1.0 - c)
+    return open_sign * RB_GRIPPER_FINGER_TRAVEL_M * (1.0 - c)
 
 
-def finger_meter_to_closeness(meter: float) -> float:
+def finger_meter_to_closeness(meter: float, open_sign: float = -1.0) -> float:
     """Inverse of :func:`closeness_to_finger_meter`."""
-    return max(0.0, min(1.0, 1.0 + float(meter) / RB_GRIPPER_FINGER_TRAVEL_M))
+    return max(0.0, min(1.0, 1.0 - open_sign * float(meter) / RB_GRIPPER_FINGER_TRAVEL_M))
 
 
 class RbGripperServer(BaseGripperServer):
@@ -56,7 +57,9 @@ class RbGripperServer(BaseGripperServer):
         cmd_bind_port: int = GRIPPER_CMD_PORT,
         state_send_host: str = GRIPPER_HOST,
         state_send_port: int = GRIPPER_STATE_PORT,
+        open_sign: float = -1.0,
     ) -> None:
+        self._open_sign = float(open_sign)
         self._cmd_addr = (cmd_bind_host, cmd_bind_port)
         self._state_addr = (state_send_host, state_send_port)
 
@@ -124,16 +127,16 @@ class RbGripperServer(BaseGripperServer):
         cmd = self.get_targets()
         if not cmd["homed"]:
             return None
-        left_m = closeness_to_finger_meter(cmd["left"])
-        right_m = closeness_to_finger_meter(cmd["right"])
+        left_m = closeness_to_finger_meter(cmd["left"], self._open_sign)
+        right_m = closeness_to_finger_meter(cmd["right"], self._open_sign)
         return np.array([left_m, right_m], dtype=np.float64)
 
     def publish_state(self, current_positions: np.ndarray, simulation_time: float) -> None:
         if len(current_positions) < 2:
             return
         self.set_present(
-            finger_meter_to_closeness(current_positions[0]),
-            finger_meter_to_closeness(current_positions[1]),
+            finger_meter_to_closeness(current_positions[0], self._open_sign),
+            finger_meter_to_closeness(current_positions[1], self._open_sign),
             simulation_time,
         )
 
