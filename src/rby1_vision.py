@@ -31,10 +31,10 @@ STEREO_BASELINE = 0.12
 
 # Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the
 # wrist link; the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()). The camera
-# sits on the thin (y) side of the gripper base and looks past the fingertips.
+# sits on the thin (y) side, slightly behind the gripper base, and looks past the fingertips.
 WRIST_CAM = {
-    "left": (np.array([0.0, 0.07, -0.10]), np.array([0.0, -0.07, -0.25]), np.array([1.0, 0.0, 0.0])),
-    "right": (np.array([0.0, -0.07, -0.10]), np.array([0.0, 0.07, -0.25]), np.array([1.0, 0.0, 0.0])),
+    "left": (np.array([0.0, 0.09, -0.03]), np.array([0.0, -0.09, -0.32]), np.array([1.0, 0.0, 0.0])),
+    "right": (np.array([0.0, -0.09, -0.03]), np.array([0.0, 0.09, -0.32]), np.array([1.0, 0.0, 0.0])),
 }
 
 SPHERE_R = 0.012
