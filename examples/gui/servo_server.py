@@ -11,6 +11,7 @@ Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yello
   {"cmd": "place_on", "base": "green"}             put the held box on top of the green box
   {"cmd": "pick_place", "color": .., "x": .., "y": .., "top": ..}
   {"cmd": "stack", "order": ["green", "blue", "yellow"]}   bottom first; the first box stays where it is
+  {"cmd": "unstack"}                               take a stack apart: top box first onto free table spots (its start spot if free)
   {"cmd": "home"}                                  open the gripper and go back to the seed pose
   {"cmd": "gripper", "closeness": 0..1}
   {"cmd": "scene"}                                 reply only (see below): the boxes as the robot sees them, and its state
@@ -20,7 +21,7 @@ Status goes to 127.0.0.1:5121: {"type": "status", "state": "idle"|"busy", "task"
 Any command may carry "reply": PORT (examples/gui/rbyctl.py does): the log lines of that job, then {"type": "result", "ok": bool, "text": ..}
 go to 127.0.0.1:PORT as well, and "scene" is answered there as {"type": "scene", "boxes": .., "robot": .., "table": ..}.
 
-pick/place/pick_place/home were run in the simulator; the colours, place_on, stack and scene are NOT RUN YET (see grasp_core.py): the
+pick/place/pick_place/home/stack/scene were run in the simulator; unstack is NOT RUN YET (see grasp_core.py): the
 dispatch logic is covered by test_offline.py with a fake robot.
 """
 import contextlib
@@ -85,7 +86,7 @@ class Server:
                 self.reply({"type": "scene", **self.robot.scene()}, to)
             except Exception as exc:  # noqa: BLE001 - a failing query must not take the service down
                 self.reply({"type": "result", "ok": False, "text": f"scene: {exc}"}, to)
-        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "home", "gripper"):
+        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "unstack", "home", "gripper"):
             if self.task and cmd != "gripper":
                 self.log(f"busy with '{self.task}': {cmd} ignored (abort first)")
                 self.reply({"type": "result", "ok": False, "text": f"busy with '{self.task}'"}, to)
@@ -144,6 +145,8 @@ class Server:
             r.place(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP))
         elif cmd == "stack":
             r.stack(list(msg["order"]))
+        elif cmd == "unstack":
+            r.unstack()
         elif cmd == "home":
             r.home()
         elif cmd == "gripper":

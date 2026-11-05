@@ -150,3 +150,24 @@ def direction_spot(direction, boxes, exclude=None, top=TABLE_TOP, table_center=T
             if best is None or key < best[0]:
                 best = (key, (round(x, 3), round(y, 3)))
     return None if best is None else best[1]
+
+
+def unstack_order(boxes):
+    """Boxes that rest on another one, highest first: the order in which a stack is taken apart ({name: (x, y, z)})."""
+    on = stacked_on(boxes)
+    return sorted((n for n in boxes if on[n]), key=lambda n: -boxes[n][2])
+
+
+def table_spot(name, boxes, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE):
+    """A free table spot for the `name` box: its own start spot if nothing is closer than FINGER_CLEARANCE, else another start spot (boxes were
+    picked there, so the arm reaches them), else the best free spot the reach model allows; None when there is none."""
+    others = [(x, y) for n, (x, y, _) in boxes.items() if n != name]
+    starts = [BOX_DEFAULTS[name]] + [xy for n, xy in BOX_DEFAULTS.items() if n != name]
+    for x, y in starts:
+        if check_pose(x, y, top, table_center, table_size) is None and all(math.hypot(x - ox, y - oy) >= FINGER_CLEARANCE for ox, oy in others):
+            return (x, y)
+    for direction in ("center", "right", "left", "near", "far"):
+        spot = direction_spot(direction, boxes, exclude=name, top=top, table_center=table_center, table_size=table_size)
+        if spot is not None:
+            return spot
+    return None

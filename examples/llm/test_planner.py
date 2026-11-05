@@ -48,6 +48,12 @@ def test_parse():
 def test_validate():
     ok = {"steps": [{"skill": "stack", "order": ["green", "blue", "yellow"]}]}
     assert P.validate(ok, ROW) == []
+    stacked = scene({"green": {"pos": [0.62, -0.34, 0.84], "on": "blue"}, "yellow": {"pos": [0.62, -0.34, 0.92], "on": "green"}})
+    stacked["boxes"]["blue"]["pos"] = [0.62, -0.34, 0.76]
+    assert P.validate({"steps": [{"skill": "unstack"}]}, stacked) == []
+    assert any("nothing is stacked" in e for e in P.validate({"steps": [{"skill": "unstack"}]}, ROW))
+    assert any("holds the" in e for e in P.validate({"steps": [{"skill": "unstack"}]}, {**stacked, "robot": {"held": "blue", "holding": True}}))
+    assert P.to_command({"skill": "unstack"}, stacked) == {"cmd": "unstack"}
     bad = {"steps": [{"skill": "fly"}, {"skill": "pick"}, {"skill": "pick", "color": "red"}, {"skill": "stack", "order": ["green"]},
                      {"skill": "move", "color": "blue", "to": "up"}, {"skill": "place", "x": 0.3, "y": 0.0}, {"skill": "home", "x": 1}]}
     errors = P.validate(bad, ROW)

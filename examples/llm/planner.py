@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import scene_config as C  # noqa: E402
 
 DIRECTIONS = ("right", "left", "near", "far", "center")
-SKILLS = {"stack": {"order"}, "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set()}
+SKILLS = {"stack": {"order"}, "unstack": set(), "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set()}
 MODEL, ESCALATE = "claude-haiku-5-5", "claude-sonnet-5-5"
 
 SYSTEM = """You plan tasks for a humanoid robot (RB-Y1) that moves three 5 cm boxes on a table with its RIGHT arm. You do not control the motors: you
@@ -35,9 +35,11 @@ choose skills; a visual-servo executor carries them out and checks reach and cle
 Boxes: "blue", "green", "yellow". Frame: x forward from the robot, y to the robot's left, so the robot's RIGHT is -y. Words like
 right / left / near (towards the robot) / far (away from it) / center refer to that frame.
 
-Skills (JSON objects in "steps", run in order):
+Skills (JSON objects in "steps", run in order). "Put the boxes back / take the stack down / unstack" means the unstack skill:
   {"skill": "stack", "order": ["green", "blue", "yellow"]}   stack boxes, bottom first. The first box stays where it is; every other one is
                                                              picked up and put on top of the one before it.
+  {"skill": "unstack"}                                       take a stack apart again: the boxes that rest on others are put back on the
+                                                             table, top first, each on a free spot (its own start spot if free). Needs a stack.
   {"skill": "move", "color": "blue", "to": "right"}          pick the box and put it on the free table spot furthest right | left | near |
                                                              far, or the best central spot ("center"), or at {"to": [x, y]}.
   {"skill": "pick", "color": "blue"}                         pick the box up (the hand must be empty)
@@ -115,12 +117,15 @@ def validate(plan, scene):
             errors.append(f"{where}: {skill} takes {sorted(SKILLS[skill])}" + (f", got extra {sorted(extra)}" if extra else "")
                           + (f", missing {sorted(missing)}" if missing else ""))
             continue
-        needs_empty = skill in ("stack", "move", "pick", "home")
+        needs_empty = skill in ("stack", "unstack", "move", "pick", "home")
         if i == 1 and needs_empty and holding:
             errors.append(f"{where}: the hand holds the {holding} box: put it down first (place or place_on)")
         if i == 1 and skill in ("place", "place_on") and not holding:
             errors.append(f"{where}: {skill} needs a box in the hand and the hand is empty")
-        if skill == "stack":
+        if skill == "unstack":
+            if not C.unstack_order(boxes):
+                errors.append(f"{where}: nothing is stacked")
+        elif skill == "stack":
             errors += [f"{where}: {p}" for p in C.stack_problems(step["order"], {c: p for c, p in boxes.items()})] \
                 if isinstance(step["order"], list) else [f"{where}: order must be a list of colours"]
         elif skill in ("move", "pick"):
@@ -196,6 +201,8 @@ def to_command(step, scene):
     skill = step["skill"]
     if skill == "stack":
         return {"cmd": "stack", "order": step["order"]}
+    if skill == "unstack":
+        return {"cmd": "unstack"}
     if skill == "pick":
         return {"cmd": "pick", "color": step["color"]}
     if skill == "place":

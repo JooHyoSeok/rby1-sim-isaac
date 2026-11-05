@@ -7,6 +7,7 @@
   rbyctl.py place-on green                 put the held box on top of the green box (aligned by the stereo rig)
   rbyctl.py move blue right                pick the blue box and put it on the free spot furthest right (left | near | far | center), or at x y
   rbyctl.py stack green blue yellow        bottom first; the first box stays where it is
+  rbyctl.py unstack                        take a stack apart: top box first onto free table spots (its own start spot when free)
   rbyctl.py home | seed | abort | gripper 0.0..1.0
   rbyctl.py set-box blue 0.62 -0.30 [--z Z] [--yaw DEG]   simulator only: teleport a box (a box dropped on another one: give --z)
   rbyctl.py reset                          simulator only: table and boxes back to their start positions
@@ -151,7 +152,7 @@ def main(argv=None):
     p = sub.add_parser("stack")
     p.add_argument("order", nargs="+", choices=C.BOX_NAMES, help="bottom first")
     p.set_defaults(fn=lambda a: run_task({"cmd": "stack", "order": a.order}))
-    for verb in ("home", "seed"):
+    for verb in ("home", "seed", "unstack"):
         sub.add_parser(verb).set_defaults(fn=lambda a, v=verb: run_task({"cmd": v}))
     sub.add_parser("abort").set_defaults(fn=lambda a: run_task({"cmd": "abort"}, 5.0))
     p = sub.add_parser("gripper")

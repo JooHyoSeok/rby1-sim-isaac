@@ -93,6 +93,11 @@ def test_boxes():
     assert C.pick_problem("blue", stack) is None
     # a stack whose base is too far away: the model says so before the arm finds out
     assert "level 2 of the stack" in C.stack_problems(["green", "blue"], {**row, "green": (0.73, -0.22, 0.76)})[0]
+    # taking a stack apart: top box first, each onto its own start spot when that is free
+    st = {"blue": (0.62, -0.34, 0.76), "green": (0.62, -0.34, 0.84), "yellow": (0.62, -0.34, 0.92)}
+    assert C.unstack_order(st) == ["yellow", "green"] and C.unstack_order(row) == []
+    assert C.table_spot("yellow", st) == C.BOX_DEFAULTS["yellow"] and C.table_spot("green", {**st, "yellow": (*C.BOX_DEFAULTS["yellow"], 0.76)}) == C.BOX_DEFAULTS["green"]
+    assert C.table_spot("green", {**st, "yellow": (0.62, -0.20, 0.76)}) is None or C.table_spot("green", {**st, "yellow": (0.62, -0.20, 0.76)})[1] != -0.22   # its start spot is taken
     # free spots: only where nothing is closer than the finger clearance; on the default table there is no room beside the row
     assert C.direction_spot("right", row, exclude="blue") == (0.62, -0.33)               # the blue box's own spot
     assert C.direction_spot("right", row) is None
@@ -407,6 +412,9 @@ class FakeRobot:
     def place_on(self, base):
         self.calls.append(("place_on", base))
 
+    def unstack(self):
+        self.calls.append(("unstack",))
+
     def stack(self, order):
         self.calls.append(("stack", tuple(order)))
         if "yellow" not in order:
@@ -583,6 +591,47 @@ def test_verify_and_stack():
     assert r.abort_flag.is_set()
 
 
+def test_unstack():
+    """GraspRobot.unstack with a fake scene: top box first, onto its own start spot, bottom box stays; a clear table is refused."""
+    r = object.__new__(grasp_core.GraspRobot)
+    r.events, r.abort_flag, r._depth, r.phase, r.holding, r.held = [], threading.Event(), 0, "idle", False, None
+    r.event = r.events.append
+    pos = {"blue": (0.62, -0.34, 0.76), "green": (0.62, -0.34, 0.84), "yellow": (0.62, -0.34, 0.92)}
+    moved = []
+
+    class P:
+        def boxes(self, max_age=1.5):
+            return {c: {"t": list(t)} for c, t in pos.items()}
+
+        def wait_box(self, color, count=6, timeout=8.0, abort=None):
+            return [{"boxes": {color: {"t": list(pos[color])}}}]
+    r.perception = P()
+    r.pick = lambda c, **kw: moved.append(("pick", c))
+    r.place = lambda x, y, top=C.TABLE_TOP: (moved.append(("place", round(x, 2), round(y, 2))), pos.__setitem__(moved[-2][1], (x, y, 0.76)))
+    r.unstack()
+    assert moved == [("pick", "yellow"), ("place", 0.62, -0.1), ("pick", "green"), ("place", 0.62, -0.22)], moved
+    assert pos["blue"] == (0.62, -0.34, 0.76) and "on the table at (0.620, -0.220)" in r.events[-1]
+    try:
+        r.unstack()
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "nothing is stacked" in str(exc)
+    # a box that did not land on the table is reported
+    pos.update({"green": (0.62, -0.34, 0.84)})
+    r.place = lambda x, y, top=C.TABLE_TOP: pos.__setitem__("green", (x, y, 0.84))      # it stayed in the air
+    try:
+        r.unstack()
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "not standing on the table" in str(exc)
+    r.holding, r.held = True, "blue"
+    try:
+        r.unstack()
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "holds the blue box" in str(exc)
+
+
 # ---- rbyctl against the server with the fake robot -----------------------------------------------------------------------------
 def test_rbyctl():
     import contextlib
@@ -604,6 +653,8 @@ def test_rbyctl():
         assert robot.calls[-1] == ("stack", ("green", "blue", "yellow"))
         rc, out = run("stack", "green", "blue")                                      # the fake robot refuses this one
         assert rc == 1 and "FAILED: failed: stack: cannot see the yellow box" in out, (rc, out)
+        rc, out = run("unstack")
+        assert rc == 0 and robot.calls[-1] == ("unstack",) and "done: unstack" in out, (rc, out)
         rc, out = run("pick", "yellow")
         assert rc == 0 and robot.calls[-1] == ("pick", "yellow", True, (0.0, 0.0, 0.0))
         rc, out = run("place-on", "green")
@@ -629,7 +680,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_unstack, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

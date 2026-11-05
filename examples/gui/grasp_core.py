@@ -5,7 +5,7 @@ pick is the one of examples/vservo/hybrid_grasp.py (see its docstring for the re
 reports what it does, can be started from any hand pose, and that a held box can be put down at a chosen place or on another box
 (stereo-relative alignment, see _align_over). Three boxes are told apart by the colour of their landmarks.
 
-pick / place / pick_place / home were run in the simulator (single box). NOT RUN YET: the three-box perception, place_on and stack. The pure
+pick / place / pick_place / home / place_on / stack were run in the simulator. NOT RUN YET: unstack. The pure
 helpers (smoothstep, place_waypoints, scene_config) are covered by test_offline.py, everything that talks to the robot is not.
 """
 import collections
@@ -439,6 +439,43 @@ class GraspRobot:
                 self.pick(c)
                 self.place_on(below)
         self._run("stack", body)
+
+    def unstack(self):
+        """Take a stack apart: the top box first, each one onto a free table spot (its own start spot when that is free), until no box rests on
+        another one. The bottom box stays. The scene is read again before every box, so it works from whatever the cameras see."""
+        def body():
+            if self.holding:
+                raise TaskError(f"the hand holds the {self.held} box: put it down first")
+            done = 0
+            while done < len(C.BOX_NAMES):
+                time.sleep(0.5)                                  # let the cameras catch up with the last placement
+                boxes = {c: tuple(b["t"]) for c, b in self.perception.boxes().items()}
+                order = C.unstack_order(boxes)
+                if not order:
+                    break
+                c = order[0]
+                spot = C.table_spot(c, boxes)
+                if spot is None:
+                    raise TaskError(f"no free table spot for the {c} box")
+                self.event(f"unstack: the {c} box goes to ({spot[0]:.2f}, {spot[1]:.2f})")
+                self.pick(c)
+                self.place(spot[0], spot[1])
+                self._verify_on_table(c)
+                done += 1
+            if done == 0:
+                raise TaskError("nothing is stacked")
+        self._run("unstack", body)
+
+    def _verify_on_table(self, color):
+        """After a placement on the table: is the box standing at table height? Logs where; raises when it clearly is not."""
+        est = self.perception.wait_box(color, 3, timeout=4.0, abort=self.abort_flag)
+        if not est:
+            self.event(f"could not check the {color} box (not visible)")
+            return
+        x, y, z = np.mean([m["boxes"][color]["t"] for m in est], axis=0)
+        self.event(f"{color} box on the table at ({x:.3f}, {y:.3f}), height {z:.3f}")
+        if abs(z - (C.TABLE_TOP + C.BOX_SIZE[2] / 2)) > 0.02:
+            raise TaskError(f"the {color} box is not standing on the table (height {z:.3f} m)")
 
     def _align_over(self, base):
         """Hover loop over the `base` box: drive the held box's centre onto the base box's centre. Both are measured by the stereo rig
