@@ -30,6 +30,24 @@ def test_kinematics():
     assert up["wrist"][2] > up["elbow"][2] + 0.2 and up["hand_tip"][2] > 1.8        # forearm straight up at the side
 
 
+def test_both_arms():
+    """The left arm mirrors the right one; both may move; the arms keep apart; each hand stays on its side."""
+    assert np.allclose(K.points({}, "left")["hand_tip"], [0.0, 0.22, 0.5919], atol=0.002)
+    assert np.allclose(K.tip_direction({}, "left"), [0, 0, -1], atol=1e-6)
+    wave_left = {"unit": "deg", "waypoints": [{"t": 2.0, "left_arm_1": 90}, {"t": 2.0, "left_arm_2": 90, "left_arm_3": -90},
+                                              {"t": 1.2, "left_arm_2": 65}, {"t": 1.2, "left_arm_2": 115}, {"t": 2.6, "left_arm_1": 10, "left_arm_2": 0, "left_arm_3": -10}]}
+    v, sm = S.check(HANG, wave_left)
+    assert v == [], v
+    assert sm["waypoints"][1]["left_hand_tip"][2] > 1.8 and sm["waypoints"][1]["left_hand_tip"][1] > 0.4        # the left forearm points up on the left side
+    assert S.check(HANG, {"waypoints": [{"t": 3.0, "left_arm_1": -20}]})[0] != []                              # left_arm_1 only goes positive
+    both = {"unit": "deg", "waypoints": [{"t": 3.0, "right_arm_1": -90, "left_arm_1": 90}]}                    # both arms up sideways at once: fine
+    assert S.check(HANG, both)[0] == []
+    # the right arm swung across the body into the left arm
+    cross = {"unit": "deg", "waypoints": [{"t": 4.0, "left_arm_0": -80, "left_arm_3": -60, "right_arm_0": -80, "right_arm_3": -60, "right_arm_1": -6, "left_arm_1": 6}]}
+    v, _ = S.check(HANG, cross)
+    assert any("arms would touch" in m for m in v), v
+
+
 def test_expand():
     plan = S.expand({"right_arm_3": -0.5}, wave())
     assert len(plan) == 8 and abs(plan[0][1]["right_arm_3"] - (-0.5)) < 1e-9 and abs(plan[1][1]["right_arm_3"] + np.pi / 2) < 1e-9
@@ -47,7 +65,7 @@ def test_wave_is_fine():
     v, summary = S.check(HANG, wave())
     assert v == [], v
     assert summary["duration_s"] == 2 + 2 + 5 * 1.2 + 2 and len(summary["waypoints"]) == 8
-    assert summary["waypoints"][1]["hand_tip"][2] > 1.8 and summary["lowest_z"]["hand_tip"] > 0.5
+    assert summary["waypoints"][1]["hand_tip"][2] > 1.8 and summary["lowest_z"]["right_hand_tip"] > 0.5
 
 
 def only(traj, **kw):
@@ -58,7 +76,6 @@ def only(traj, **kw):
 def test_rules():
     wp = lambda **j: {"waypoints": [{"t": 3.0, **j}]}   # noqa: E731
     # joints that may not move, unknown joints
-    assert any("left_arm_0 may not be moved" in m for m in only(wp(left_arm_0=30)))
     assert any("right_wheel may not be moved" in m for m in only(wp(right_wheel=30)))
     assert any("torso_1 may not be moved" in m for m in only(wp(torso_1=30)))
     # limits: the URDF range minus a margin, and the tighter head / torso ranges
@@ -74,11 +91,14 @@ def test_rules():
     assert any("lasts" in m for m in only({"waypoints": [{"t": 3.0, "head_0": (i % 2) * 10} for i in range(11)]}))
     # clearance rules, point by point: the table (only over it, and only below the clearance), the floor, boxes
     rules = lambda name, p, boxes=None: {r for r, _ in S._clearance(name, p, boxes)}   # noqa: E731
-    assert rules("hand_tip", (0.70, 0.0, 0.78)) == {"table"} and rules("hand_tip", (0.70, 0.0, 0.85)) == set()
-    assert rules("hand_tip", (0.45, 0.0, 0.78)) == set()                        # in front of the table edge (0.58) it is free
-    assert rules("elbow", (0.30, -0.5, 0.15)) == {"floor"}
-    assert rules("hand_tip", (0.62, -0.22, 0.80), {"green": (0.62, -0.22, 0.76)}) == {"table", "box green"}
-    assert rules("hand_tip", (0.62, -0.22, 1.00), {"green": (0.62, -0.22, 0.76)}) == set()
+    assert rules("right_hand_tip", (0.70, 0.0, 0.78)) == {"table"} and rules("left_hand_tip", (0.70, 0.0, 0.85)) == set()
+    assert rules("right_hand_tip", (0.45, 0.0, 0.78)) == set()                  # in front of the table edge (0.58) it is free
+    assert rules("right_elbow", (0.30, -0.5, 0.15)) == {"floor"}
+    assert rules("right_hand_tip", (0.62, -0.22, 0.80), {"green": (0.62, -0.22, 0.76)}) == {"table", "box green"}
+    assert rules("left_hand_tip", (0.62, -0.22, 1.00), {"green": (0.62, -0.22, 0.76)}) == set()
+    # each hand stays on its own side of the body's middle
+    assert rules("right_wrist", (0.1, 0.2, 1.0)) == {"chest"} and rules("right_wrist", (0.1, -0.3, 1.0)) == set()
+    assert rules("left_wrist", (0.1, -0.2, 1.0)) == {"chest"} and rules("left_wrist", (0.1, 0.3, 1.0)) == set()
     seeded = dict(zip(K.TORSO, [0, 1, -2, 1, 0, 0.0])) | dict(zip(K.RIGHT_ARM, [0, 0, 0, -1.8, 0, 0.3, -1.57]))
     across = {"right_arm_0": 124, "right_arm_1": -29, "right_arm_2": 131, "right_arm_3": -79, "right_arm_4": -79, "right_arm_5": -83, "right_arm_6": 44}
     v, _ = S.check(HANG, {"waypoints": [{"t": 8.0, **across}]})
@@ -115,9 +135,10 @@ def test_tools():
         text = out.getvalue()
         return rc, (json.loads(text) if text.lstrip().startswith("{") else text)
     rc, st = run("state")
-    assert rc == 0 and st["joints_deg"]["right_arm_3"] == 0.0 and st["holding_box"] is None and "head_looks_along" in st
+    assert rc == 0 and st["joints_deg"]["right_arm_3"] == 0.0 and st["joints_deg"]["left_arm_1"] == 0.0 and st["holding_box"] is None and "head_looks_along" in st
+    assert st["left_hand_tip"] == [0.0, 0.22, 0.592]
     rc, lim = run("limits")
-    assert lim["joints"]["right_arm_1"]["max"] < 0 and lim["joints"]["head_0"]["max"] == round(S._limit("head_0")[1] * 180 / np.pi, 1) and "left_arm_0" not in lim["joints"]
+    assert lim["joints"]["left_arm_1"]["min"] > 0 > lim["joints"]["right_arm_1"]["max"] and lim["joints"]["head_0"]["max"] == round(S._limit("head_0")[1] * 180 / np.pi, 1) and "left_arm_0" in lim["joints"] and "torso_1" not in lim["joints"]
     rc, fk = run("fk", "right_arm_1=-90", "right_arm_2=-90", "right_arm_3=-90")
     assert fk["hand_tip"][2] > 1.8 and fk["with"]["right_arm_3"] == -90.0
     rc, fk = run("fk", "head_0=40")
@@ -140,7 +161,7 @@ def test_tools():
 
 
 if __name__ == "__main__":
-    tests = [test_kinematics, test_expand, test_wave_is_fine, test_rules, test_tools]
+    tests = [test_kinematics, test_both_arms, test_expand, test_wave_is_fine, test_rules, test_tools]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

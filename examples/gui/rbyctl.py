@@ -8,6 +8,7 @@
   rbyctl.py move blue right                pick the blue box and put it on the free spot furthest right (left | near | far | center), or at x y
   rbyctl.py stack green blue yellow        bottom first; the first box stays where it is
   rbyctl.py unstack                        take a stack apart: top box first onto free table spots (its own start spot when free)
+  rbyctl.py drive [--forward M] [--turn DEG] [--home]   roll the base (turn first, positive = left; at most 30 cm / 90 deg per command), or back to the start
   rbyctl.py home | seed | abort | gripper 0.0..1.0
   rbyctl.py set-box blue 0.62 -0.30 [--z Z] [--yaw DEG]   simulator only: teleport a box (a box dropped on another one: give --z)
   rbyctl.py reset                          simulator only: table and boxes back to their start positions
@@ -154,6 +155,11 @@ def main(argv=None):
     p.set_defaults(fn=lambda a: run_task({"cmd": "stack", "order": a.order}))
     for verb in ("home", "seed", "unstack"):
         sub.add_parser(verb).set_defaults(fn=lambda a, v=verb: run_task({"cmd": v}))
+    p = sub.add_parser("drive")
+    p.add_argument("--forward", type=float, default=0.0, help="metres, negative = back")
+    p.add_argument("--turn", type=float, default=0.0, help="degrees, positive = left")
+    p.add_argument("--home", action="store_true", help="back to the start pose")
+    p.set_defaults(fn=lambda a: run_task({"cmd": "drive", "forward": a.forward, "turn_deg": a.turn, "home": a.home}))
     sub.add_parser("abort").set_defaults(fn=lambda a: run_task({"cmd": "abort"}, 5.0))
     p = sub.add_parser("gripper")
     p.add_argument("closeness", type=float)

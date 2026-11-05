@@ -58,6 +58,13 @@ def test_validate():
     assert any("request must be" in e for e in P.validate({"steps": [{"skill": "improvise", "request": " "}]}, ROW))
     assert any("holds the" in e for e in P.validate({"steps": [{"skill": "improvise", "request": "wave"}]}, scene(held="blue")))
     assert P.to_command({"skill": "improvise", "request": "wave"}, ROW) == {"cmd": "improvise", "request": "wave"}
+    # drive: numbers in range, at least one of forward / turn / home, nothing else
+    assert P.validate({"steps": [{"skill": "drive", "forward_m": -0.2, "turn_deg": 30}, {"skill": "drive", "home": True}]}, ROW) == []
+    assert any("needs forward_m" in e for e in P.validate({"steps": [{"skill": "drive"}]}, ROW))
+    assert any("at most 0.3 m" in e for e in P.validate({"steps": [{"skill": "drive", "forward_m": 0.5}]}, ROW))
+    assert any("at most 0.3 m" in e for e in P.validate({"steps": [{"skill": "drive", "turn_deg": 120}]}, ROW))
+    assert any("takes" in e or "extra" in e for e in P.validate({"steps": [{"skill": "drive", "sideways_m": 0.1}]}, ROW))
+    assert P.to_command({"skill": "drive", "turn_deg": -30}, ROW) == {"cmd": "drive", "forward": 0.0, "turn_deg": -30, "home": False}
     bad = {"steps": [{"skill": "fly"}, {"skill": "pick"}, {"skill": "pick", "color": "red"}, {"skill": "stack", "order": ["green"]},
                      {"skill": "move", "color": "blue", "to": "up"}, {"skill": "place", "x": 0.3, "y": 0.0}, {"skill": "home", "x": 1}]}
     errors = P.validate(bad, ROW)

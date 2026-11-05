@@ -28,7 +28,8 @@ import scene_config as C  # noqa: E402
 
 DIRECTIONS = ("right", "left", "near", "far", "center")
 SKILLS = {"stack": {"order"}, "unstack": set(), "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set(),
-          "improvise": {"request"}}
+          "improvise": {"request"}, "drive": set()}
+OPTIONAL = {"drive": {"forward_m", "turn_deg", "home"}}
 MODEL, ESCALATE = "claude-haiku-5-5", "claude-sonnet-5-5"
 
 SYSTEM = """You plan tasks for a humanoid robot (RB-Y1) that moves three 5 cm boxes on a table with its RIGHT arm. You do not control the motors: you
@@ -48,6 +49,10 @@ Skills (JSON objects in "steps", run in order). "Put the boxes back / take the s
   {"skill": "place", "x": 0.62, "y": -0.3}                   put the held box on the table at (x, y)
   {"skill": "place_on", "base": "green"}                     put the held box on top of the green box
   {"skill": "home"}                                          open the hand and return to the ready pose (hand must be empty)
+  {"skill": "drive", "forward_m": -0.2, "turn_deg": 30}      roll the base on its wheels: first turn_deg degrees (positive = left, negative = right, at
+                                                             most 90), then forward_m metres (negative = back, at most 0.3); or {"skill": "drive", "home": true}
+                                                             to roll back where it started. Refused when the arm or base would hit the table. Until the base is
+                                                             back, pick / stack / home do not work.
   {"skill": "improvise", "request": "손 흔들어"}               a body motion none of the skills above covers (waving, nodding, looking left or right,
                                                              raising the arm): a second model designs it with joint-level tools. NOT for moving boxes;
                                                              the hand must be empty. Pass the user's wish as "request", in the user's words.
@@ -116,7 +121,7 @@ def validate(plan, scene):
         if skill not in SKILLS:
             errors.append(f"{where}: unknown skill {skill!r}")
             continue
-        extra = set(step) - SKILLS[skill] - {"skill"}
+        extra = set(step) - SKILLS[skill] - OPTIONAL.get(skill, set()) - {"skill"}
         missing = SKILLS[skill] - set(step)
         if extra or missing:
             errors.append(f"{where}: {skill} takes {sorted(SKILLS[skill])}" + (f", got extra {sorted(extra)}" if extra else "")
@@ -127,7 +132,15 @@ def validate(plan, scene):
             errors.append(f"{where}: the hand holds the {holding} box: put it down first (place or place_on)")
         if i == 1 and skill in ("place", "place_on") and not holding:
             errors.append(f"{where}: {skill} needs a box in the hand and the hand is empty")
-        if skill == "improvise":
+        if skill == "drive":
+            f, t, home = step.get("forward_m", 0.0), step.get("turn_deg", 0.0), step.get("home", False)
+            if not (isinstance(f, (int, float)) and isinstance(t, (int, float)) and isinstance(home, bool)):
+                errors.append(f"{where}: forward_m and turn_deg are numbers, home is true or false")
+            elif not home and not f and not t:
+                errors.append(f"{where}: drive needs forward_m, turn_deg or home")
+            elif abs(f) > 0.3 or abs(t) > 90:
+                errors.append(f"{where}: at most 0.3 m and 90 degrees per drive step (split it into several steps)")
+        elif skill == "improvise":
             if not isinstance(step["request"], str) or not step["request"].strip():
                 errors.append(f"{where}: request must be the user's wish as text")
         elif skill == "unstack":
@@ -211,6 +224,8 @@ def to_command(step, scene):
         return {"cmd": "stack", "order": step["order"]}
     if skill == "improvise":
         return {"cmd": "improvise", "request": step["request"]}
+    if skill == "drive":
+        return {"cmd": "drive", "forward": step.get("forward_m", 0.0), "turn_deg": step.get("turn_deg", 0.0), "home": step.get("home", False)}
     if skill == "unstack":
         return {"cmd": "unstack"}
     if skill == "pick":

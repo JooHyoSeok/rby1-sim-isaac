@@ -10,11 +10,14 @@ JOINTS = {j["name"]: j for j in TREE["joints"]}
 _PARENT_JOINT = {j["child"]: j for j in TREE["joints"]}
 TORSO = [f"torso_{i}" for i in range(6)]
 RIGHT_ARM = [f"right_arm_{i}" for i in range(7)]
+LEFT_ARM = [f"left_arm_{i}" for i in range(7)]
 HEAD = ["head_0", "head_1"]
-# points on the right arm that matter for keeping clear of things: (link, offset in the link frame). The hand: the wrist link origin, the ee frame
-# lies 0.1261 below it and the fingertips 0.12 further along -z (examples/vservo/servo.py LINK_TO_EE, grasp_core TOOL).
-POINTS = {"elbow": ("link_right_arm_3", (0, 0, 0)), "forearm": ("link_right_arm_4", (0, 0, 0)), "wrist": ("link_right_arm_6", (0, 0, 0)),
-          "hand_mid": ("link_right_arm_6", (0, 0, -0.12)), "hand_tip": ("link_right_arm_6", (0, 0, -0.2461))}
+# points on an arm that matter for keeping clear of things: (link, offset in the link frame). The hand: the wrist link origin, the ee frame
+# lies 0.1261 below it and the fingertips 0.12 further along -z (examples/vservo/servo.py LINK_TO_EE, grasp_core TOOL). The left arm mirrors the
+# right one (same link layout; the sideways and roll joints 1, 2, 4, 6 have the opposite sign, e.g. positive left_arm_1 lifts it sideways).
+POINTS_BY_ARM = {side: {"elbow": (f"link_{side}_arm_3", (0, 0, 0)), "forearm": (f"link_{side}_arm_4", (0, 0, 0)), "wrist": (f"link_{side}_arm_6", (0, 0, 0)),
+                        "hand_mid": (f"link_{side}_arm_6", (0, 0, -0.12)), "hand_tip": (f"link_{side}_arm_6", (0, 0, -0.2461))} for side in ("right", "left")}
+POINTS = POINTS_BY_ARM["right"]
 
 
 def _rot(axis, angle):
@@ -53,17 +56,19 @@ def link_pose(q, link):
     return T
 
 
-def points(q):
-    """{name: xyz} of POINTS in the base frame."""
-    out = {}
-    for name, (link, off) in POINTS.items():
-        out[name] = (link_pose(q, link) @ np.r_[off, 1.0])[:3]
-    return out
+def points(q, arm="right"):
+    """{name: xyz} of the key points of one arm in the base frame."""
+    return {name: (link_pose(q, link) @ np.r_[off, 1.0])[:3] for name, (link, off) in POINTS_BY_ARM[arm].items()}
 
 
-def tip_direction(q):
+def all_points(q):
+    """{"right_hand_tip": xyz, ..., "left_elbow": xyz, ...} for both arms."""
+    return {f"{side}_{name}": p for side in ("right", "left") for name, p in points(q, side).items()}
+
+
+def tip_direction(q, arm="right"):
     """Unit vector the fingertips point along (the tool axis -z of the wrist link)."""
-    return -link_pose(q, "link_right_arm_6")[:3, 2]
+    return -link_pose(q, f"link_{arm}_arm_6")[:3, 2]
 
 
 def head_forward(q):

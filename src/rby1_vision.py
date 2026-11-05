@@ -246,7 +246,7 @@ def build_ros_graph(cams: dict[str, str], stage) -> None:
     conn += [(f"ReadJoints.outputs:{a}", f"PubJoints.inputs:{a}") for a in (
         "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
         "sensorTime")]
-    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()] + [f"/World/Box_{n}" for n in BOXES]  # rigid bodies only
+    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()] + [f"/World/Box_{n}" for n in BOXES] + [f"{ROBOT_ROOT}/base"]  # rigid bodies only; base = where it drove
     values = []
     # /tf: link poses for RViz. Isaac publishes the flat RBY1 -> link frames AND the articulation chain (rooted at
     # link_torso_5); examples/rviz/tf_chain_relay.py keeps only the chain, which is a proper tree.
@@ -313,6 +313,17 @@ def write_gt(stage, path: str) -> None:
         lo, hi = (link_to_world.GetInverse().Transform(v) for v in (box.GetMin(), box.GetMax()))
         print(f"[Vision] {side} gripper extent in {link} frame: {[round(min(a, b), 3) for a, b in zip(lo, hi)]} .. "
               f"{[round(max(a, b), 3) for a, b in zip(lo, hi)]}")
+    try:   # outline of the base and the wheels in the base frame (the base stands at the origin now): the executor's drive check uses it
+        lo, hi = np.full(2, 9.0), np.full(2, -9.0)
+        for prim in stage.GetPrimAtPath(ROBOT_ROOT).GetChildren():
+            if prim.GetName() == "base" or "wheel" in prim.GetName():
+                box = cache.ComputeWorldBound(prim).ComputeAlignedBox()
+                lo, hi = np.minimum(lo, [box.GetMin()[0], box.GetMin()[1]]), np.maximum(hi, [box.GetMax()[0], box.GetMax()[1]])
+        if lo[0] < hi[0]:
+            gt["base_footprint"] = [round(float(v), 3) for v in (*lo, *hi)]
+            print(f"[Vision] base outline (x0, y0, x1, y1): {gt['base_footprint']}")
+    except Exception as exc:  # noqa: BLE001 - only the drive check needs it; the rest of the scene must come up anyway
+        print(f"[Vision] no base outline: {exc}")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(gt, f, indent=1)

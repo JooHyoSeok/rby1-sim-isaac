@@ -6,6 +6,7 @@
   robot_tools.py fk right_arm_1=-90 head_0=30   where the arm / hand / head would be with these joint values (changes from the current pose)
   robot_tools.py check --json '{"unit": "deg", "waypoints": [{"t": 2, "right_arm_1": -90}, ...]}'     safety check only, nothing moves
   robot_tools.py move  --json '{...}'           the same check, and if it passes the robot plays the trajectory
+  robot_tools.py drive --forward 0.2 --turn -30   roll the base (turn first, then forward; at most 30 cm / 90 deg per command); drive --home
   robot_tools.py save NAME | play NAME | skills   keep the last trajectory that ran under a name, play it again, list them
 
 A trajectory: "t" is seconds from the previous waypoint, a joint a waypoint does not mention keeps its value. Frame: the robot's base, x forward,
@@ -38,6 +39,13 @@ WHAT = {   # derived from the URDF axes and probed with forward kinematics; `fk`
     "right_arm_4": "forearm roll",
     "right_arm_5": "wrist flex",
     "right_arm_6": "hand roll about the finger axis",
+    "left_arm_0": "left shoulder pitch: negative swings the arm forward and up, positive backward (like right_arm_0)",
+    "left_arm_1": "left shoulder abduction: 0 = arm hangs at the side, POSITIVE lifts it sideways (+90 = horizontal): the sign is the mirror of right_arm_1",
+    "left_arm_2": "left upper-arm roll: the MIRROR of right_arm_2 (left +90 points the bent forearm up where right -90 does)",
+    "left_arm_3": "left elbow: 0 = straight, negative bends it (like right_arm_3)",
+    "left_arm_4": "left forearm roll (mirror sign of right_arm_4)",
+    "left_arm_5": "left wrist flex (like right_arm_5)",
+    "left_arm_6": "left hand roll about the finger axis (mirror sign of right_arm_6)",
     "head_0": "head yaw: positive looks left, negative looks right",
     "head_1": "head pitch: positive looks down",
     "torso_5": "torso yaw: positive turns the upper body left (the arm moves with it)",
@@ -67,9 +75,11 @@ def get_boxes(offline):
 
 
 def hand_report(q):
-    p = K.points(q)
+    p, pl = K.points(q), K.points(q, "left")
     return {"hand_tip": p["hand_tip"].round(3).tolist(), "wrist": p["wrist"].round(3).tolist(), "elbow": p["elbow"].round(3).tolist(),
-            "fingers_point_along": K.tip_direction(q).round(2).tolist(), "head_looks_along": K.head_forward(q).round(2).tolist()}
+            "fingers_point_along": K.tip_direction(q).round(2).tolist(),
+            "left_hand_tip": pl["hand_tip"].round(3).tolist(), "left_wrist": pl["wrist"].round(3).tolist(), "left_elbow": pl["elbow"].round(3).tolist(),
+            "left_fingers_point_along": K.tip_direction(q, "left").round(2).tolist(), "head_looks_along": K.head_forward(q).round(2).tolist()}
 
 
 def load_traj(args):
@@ -87,8 +97,8 @@ def out(obj):
 def cmd_state(args):
     st = get_state(args.offline)
     q = st["joints"]
-    out({"joints_deg": {n: round(q.get(n, 0.0) * D, 1) for n in sorted(S.ALLOWED)}, "other_joints": "torso_0..4, left arm, wheels: fixed, not yours to move",
-         **hand_report(q), "holding_box": st["robot"].get("held"), "arm_in_ready_pose": bool(st["robot"].get("seeded")),
+    out({"joints_deg": {n: round(q.get(n, 0.0) * D, 1) for n in sorted(S.ALLOWED)}, "other_joints": "torso_0..4 and the wheels: fixed, not yours to move",
+         **hand_report(q), "holding_box": st["robot"].get("held"), "arm_in_ready_pose": bool(st["robot"].get("seeded")), "base_x_y_yaw_deg": st["robot"].get("base"),
          "boxes_m": {c: [round(v, 3) for v in p] for c, p in get_boxes(args.offline).items()}})
 
 
@@ -146,6 +156,18 @@ def cmd_move(args):
     return run_trajectory(load_traj(args), args.offline)
 
 
+def cmd_drive(args):
+    msg = {"cmd": "drive", "forward": args.forward, "turn_deg": args.turn, "home": args.home}
+    if args.offline:
+        out({"ok": True, "sent": False, "note": "offline: not sent", **{k: v for k, v in msg.items() if k != "cmd"}})
+        return 0
+    import rbyctl
+    r = rbyctl.ask(msg, 120.0, log=lambda text: print(text, file=sys.stderr, flush=True))
+    ok = r is not None and r.get("type") == "result" and r.get("ok")
+    out({"ok": bool(ok), "result": "the executor does not answer" if r is None else r.get("text")})
+    return 0 if ok else 1
+
+
 def cmd_save(args):
     if not os.path.exists(LAST):
         sys.exit("FAILED: no trajectory has run yet")
@@ -189,6 +211,11 @@ def main(argv=None):
         p = sub.add_parser(verb)
         p.add_argument("name")
         p.set_defaults(fn=fn)
+    p = sub.add_parser("drive")
+    p.add_argument("--forward", type=float, default=0.0, help="metres, negative = back")
+    p.add_argument("--turn", type=float, default=0.0, help="degrees, positive = left")
+    p.add_argument("--home", action="store_true")
+    p.set_defaults(fn=cmd_drive)
     sub.add_parser("skills").set_defaults(fn=cmd_skills)
     args = ap.parse_args(argv)
     return args.fn(args) or 0

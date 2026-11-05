@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np  # noqa: E402
 from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
 
+import base_motion as B  # noqa: E402
 import grasp_core  # noqa: E402
 import rbyctl  # noqa: E402
 import scene_config as C  # noqa: E402
@@ -599,6 +600,113 @@ def test_verify_and_stack():
     assert r.abort_flag.is_set()
 
 
+def test_base_motion():
+    """Odometry, speed profile and the table check of the base (pure functions)."""
+    q = [0.0, 0.0]
+    odo = B.Odometry(*q)
+
+    def roll(dr, dl):                                             # distances the right / left wheel rolls forward
+        q[0] += dr / (B.WHEEL_R * B.FORWARD_SIGN)
+        q[1] += dl / (B.WHEEL_R * B.FORWARD_SIGN)
+        return odo.update(*q)
+    p = roll(0.2, 0.2)
+    assert np.allclose(p, [0.2, 0, 0], atol=1e-9)
+    p = roll(np.pi / 4 * B.TRACK, -np.pi / 4 * B.TRACK)           # a quarter turn to the left on the spot (right wheel forward, left back)
+    assert abs(p[2] - np.pi / 2) < 1e-9 and np.allclose(p[:2], [0.2, 0], atol=1e-9)
+    p = roll(0.1, 0.1)
+    assert np.allclose(p, [0.2, 0.1, np.pi / 2], atol=1e-9)       # forward now means +y
+    assert not odo.at_home()
+    # speed: slows down towards the target, never below the friction minimum, never above the maximum
+    assert B.speed(1.0, B.V_MAX, B.A_LIN, B.V_MIN) == B.V_MAX and B.speed(0.0, B.V_MAX, B.A_LIN, B.V_MIN) == B.V_MIN
+    assert B.speed(0.05, B.V_MAX, B.A_LIN, B.V_MIN) < B.speed(0.1, B.V_MAX, B.A_LIN, B.V_MIN)
+    # the way home: face the start, drive, face forward again
+    t1, d, t2 = B.way_home((0.2, 0.1, np.pi / 2))
+    assert abs(d - np.hypot(0.2, 0.1)) < 1e-9 and abs(B.wrap(np.pi / 2 + t1 + t2) - 0.0) < 1e-9
+    # the table check: hanging arm (hands low at the sides) and the READY pose (hand just in front of the table)
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
+    import kinematics as K
+    hang = list(K.all_points({}).values())
+    ready = {**dict(zip(K.TORSO, [0, 1, -2, 1, 0, 0.0])), **dict(zip(K.RIGHT_ARM, [0, 0, 0, -1.8, 0, 0.3, -1.57]))}
+    ready_pts = list(K.all_points(ready).values())
+    start = (0.0, 0.0, 0.0)
+    assert B.check_move(start, 0.10, 0.0, hang) == [] and B.check_move(start, -0.20, 0.0, hang) == [] and B.check_move(start, 0.0, np.radians(-60), hang) == []
+    assert "run into the table" in B.check_move(start, 0.25, 0.0, hang)[0]                    # 35 cm front + 25 cm > the table edge at 53 cm
+    assert "arm would hit the table" in B.check_move(start, 0.05, 0.0, ready_pts)[0]            # the READY hand is over the table edge once it rolls forward
+    assert any("at most 30 cm" in m for m in B.check_move(start, 0.5, 0.0, hang))
+    assert any("at most 90 degrees" in m for m in B.check_move(start, 0.0, np.radians(120), hang))
+    assert any("from its start pose" in m for m in B.check_move((0.4, 0.0, 0.0), -0.3, 0.0, hang) + B.check_move((0.4, 0.0, 0.0), 0.3, np.radians(90), hang))
+
+
+def test_drive():
+    """GraspRobot.drive on a simulated differential-drive base (no SDK): reaches the target, refuses what the check refuses, can be aborted
+    with the wheels stopped, comes home, and blocks manipulation while the base is away."""
+    r = object.__new__(grasp_core.GraspRobot)
+    r.events, r.abort_flag, r._depth, r.phase, r.holding, r.held, r.stream = [], threading.Event(), 0, "idle", False, None, None
+    r.event, r._check, r._tick = r.events.append, (lambda: None), (lambda t_loop: sim.step(1.0 / grasp_core.RATE))
+    r.state, r.footprint, r._odo_lock = (lambda: {"joints": {}}), B.FOOTPRINT, threading.Lock()
+    r._end_stream = lambda: None
+
+    class Sim:
+        """A differential-drive base that follows the commanded (v, w) at once; wheel joint angles as the SDK would report them."""
+        def __init__(self):
+            self.q, self.sent, self.pose = [0.0, 0.0], [], np.zeros(3)
+
+        def step(self, dt):
+            v, w = self.sent[-1] if self.sent else (0.0, 0.0)
+            dr, dl = (v + w * B.TRACK / 2) * dt, (v - w * B.TRACK / 2) * dt
+            self.q[0] += dr / (B.WHEEL_R * B.FORWARD_SIGN)
+            self.q[1] += dl / (B.WHEEL_R * B.FORWARD_SIGN)
+            self.pose += [v * dt * np.cos(self.pose[2]), v * dt * np.sin(self.pose[2]), w * dt]
+    sim = Sim()
+    r._wheels = lambda: tuple(sim.q)
+    r._send_base = lambda v, w: sim.sent.append((v, w))
+    r._stop_base = lambda: sim.sent.append((0.0, 0.0))
+    r.odo = B.Odometry(*sim.q)
+    r.drive(forward=-0.10)                                                                            # back first: forward + turn would swing the corners into the table
+    x, y, yaw = r.base_pose()
+    assert abs(x + 0.10) < 0.01 and abs(y) < 0.005 and abs(yaw) < 0.01, (x, y, yaw)
+    assert max(abs(v) for v, _ in sim.sent) <= B.V_MAX + 1e-9 and sim.sent[-1] == (0.0, 0.0)          # never above the limit, ends stopped
+    r.drive(turn_deg=-30)
+    assert abs(np.degrees(r.base_pose()[2]) + 30) < 1.0 and abs(np.degrees(sim.pose[2]) + 30) < 1.0, r.base_pose()
+    # away from the start pose: manipulation refuses, with the way out
+    try:
+        r._require_base_home()
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "drive back first" in str(exc)
+    r.drive(home=True)
+    x, y, yaw = r.base_pose()
+    assert np.hypot(x, y) < B.HOME_TOL_LIN and abs(yaw) < B.HOME_TOL_ANG and r.odo.at_home(), (x, y, yaw)
+    r._require_base_home()                                                                            # at home again: fine
+    # refused: too far, into the table; nothing is sent
+    sent = len(sim.sent)
+    for kw, text in (({"forward": 0.5}, "at most 30 cm"), ({"forward": 0.3}, "run into the table"), ({"turn_deg": 120}, "at most 90 degrees")):
+        try:
+            r.drive(**kw)
+            raise AssertionError(kw)
+        except grasp_core.TaskError as exc:
+            assert text in str(exc), (kw, str(exc))
+    assert len(sim.sent) == sent
+    # abort in the middle: the wheels are told to stop
+    calls = []
+    original = r._send_base
+
+    def send_and_abort(v, w):
+        original(v, w)
+        calls.append(v)
+        if len(calls) == 5:
+            r.abort_flag.set()
+    r._send_base = send_and_abort
+    r._check = lambda: (_ for _ in ()).throw(grasp_core.Aborted("aborted")) if r.abort_flag.is_set() else None
+    try:
+        r.drive(forward=-0.2)
+        raise AssertionError("expected Aborted")
+    except grasp_core.Aborted:
+        pass
+    assert sim.sent[-1] == (0.0, 0.0) and abs(r.base_pose()[0]) < 0.19
+
+
 def test_unstack():
     """GraspRobot.unstack with a fake scene: top box first, onto its own start spot, bottom box stays; a clear table is refused."""
     r = object.__new__(grasp_core.GraspRobot)
@@ -695,7 +803,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_unstack, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_unstack, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

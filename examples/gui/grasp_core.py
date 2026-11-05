@@ -20,6 +20,7 @@ import numpy as np
 
 sys.path.insert(0, "/opt/rby1-sim-isaac/app")  # sim_gripper_bridge
 sys.path.insert(0, "/tmp")                      # vision.py, servo.py, scene_config.py, gripper_example.py, kinematics.py, safety.py (docker cp'd here)
+import base_motion as B  # noqa: E402
 import scene_config as C  # noqa: E402
 
 TOOL = 0.12          # fingertips lie this far beyond the ee frame along the tool axis (-z_ee)
@@ -134,7 +135,9 @@ class GraspRobot:
         self.fk = self.dyn.make_state(["base", "ee_right"], rby.Model_A().robot_joint_names)
         self.left_hold = dict(zip([f"left_arm_{i}" for i in range(7)], np.array(self.robot.get_state().position)[15:22]))
         self.dbg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.stream = None
+        self.stream, self._base_stream = None, None
+        self.odo, self._odo_lock = B.Odometry(*self._wheels()), threading.Lock()   # the base starts at the world origin, facing +x
+        self.footprint = self._read_footprint()
         self._fk_lock = threading.Lock()  # the status heartbeat and the running task both compute forward kinematics
         self.cmd_tip = self.tip()
 
@@ -160,8 +163,9 @@ class GraspRobot:
         return float(1.0 - (enc[1] - g.min_q[1]) / (g.max_q[1] - g.min_q[1]))
 
     def status(self):
+        x, y, yaw = self.base_pose()
         return {"phase": self.phase, "holding": self.holding, "held": self.held, "seeded": self.seeded,
-                "tip": self.tip().round(4).tolist(), "closeness": round(self.closeness(), 2)}
+                "tip": self.tip().round(4).tolist(), "closeness": round(self.closeness(), 2), "base": [round(x, 3), round(y, 3), round(float(np.degrees(yaw)), 1)]}
 
     def state(self):
         """Joint positions by name [rad] and the right hand's pose, for the agent tools (examples/agent/robot_tools.py)."""
@@ -308,6 +312,7 @@ class GraspRobot:
     def seed(self):
         """Torso squat and bent right arm: the start of every grasp (the straight arm is a Cartesian singularity)."""
         def body():
+            self._require_base_home()
             rby = self.rby
             self.event("seed pose: torso squat")
             self._joint_move(rby.BodyComponentBasedCommandBuilder().set_torso_command(
@@ -336,6 +341,7 @@ class GraspRobot:
     def pick(self, color="blue", use_image=True, bias=(0.0, 0.0, 0.0)):
         """Visual-servo to the `color` box, close the gripper, lift. Starts from the current hand pose (seeds first if needed)."""
         def body():
+            self._require_base_home()
             if self.holding:
                 raise TaskError(f"already holding the {self.held} box")
             if color not in C.BOX_NAMES:
@@ -382,6 +388,7 @@ class GraspRobot:
     def _place_at(self, x, y, top, base=None):
         """Carry the held box over (x, y) (rise first, so it clears boxes on the way), lower it onto a surface of height `top`, let go,
         back off. With `base` (colour of the box below) the hand first aligns the held box over it with the stereo rig (_align_over)."""
+        self._require_base_home()
         if not self.holding:
             raise TaskError("nothing in the hand: pick first")
         what = f"on the {base} box" if base else f"at ({x:.3f}, {y:.3f})"
@@ -495,6 +502,7 @@ class GraspRobot:
         left it, so the next pick starts with the seed pose again."""
         import safety
         def body():
+            self._require_base_home()
             rby = self.rby
             cur = self.state()["joints"]
             boxes = {c: b["t"] for c, b in self.perception.boxes().items()}
@@ -504,20 +512,25 @@ class GraspRobot:
             self.event(f"joints: {len(traj['waypoints'])} waypoints, {summary['duration_s']} s")
             self._end_stream()
             for i, (t, q, _, _) in enumerate(safety.expand(cur, traj), 1):
-                arm, torso, head = ([q.get(f"{g}_{k}", cur[f"{g}_{k}"]) for k in range(n)] for g, n in (("right_arm", 7), ("torso", 6), ("head", 2)))
+                arm, larm, torso, head = ([q.get(f"{g}_{k}", cur[f"{g}_{k}"]) for k in range(n)]
+                                          for g, n in (("right_arm", 7), ("left_arm", 7), ("torso", 6), ("head", 2)))
                 changed = lambda names: any(abs(q.get(n, cur[n]) - cur[n]) > 1e-4 for n in names)   # noqa: E731
-                arm_c, torso_c, head_c = changed([f"right_arm_{k}" for k in range(7)]), changed(["torso_5"]), changed(["head_0", "head_1"])
+                arm_c, larm_c = changed([f"right_arm_{k}" for k in range(7)]), changed([f"left_arm_{k}" for k in range(7)])
+                torso_c, head_c = changed(["torso_5"]), changed(["head_0", "head_1"])
                 self.event(f"joints: waypoint {i}/{len(traj['waypoints'])} ({t:.1f} s)")
-                if not (arm_c or torso_c or head_c):
+                if not (arm_c or larm_c or torso_c or head_c):
                     t0 = time.time()
                     while time.time() - t0 < t:
                         self._check()
                         time.sleep(0.05)
                     continue
-                body_b = rby.BodyComponentBasedCommandBuilder() if (arm_c or torso_c) else None
+                body_b = rby.BodyComponentBasedCommandBuilder() if (arm_c or larm_c or torso_c) else None
                 if arm_c:
                     body_b.set_right_arm_command(rby.ArmCommandBuilder().set_command(
                         rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(arm))))
+                if larm_c:
+                    body_b.set_left_arm_command(rby.ArmCommandBuilder().set_command(
+                        rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(larm))))
                 if torso_c:
                     body_b.set_torso_command(rby.TorsoCommandBuilder().set_command(
                         rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(torso))))
@@ -526,8 +539,118 @@ class GraspRobot:
                 self._joint_move(body_b, f"waypoint {i}", head_builder=head_b)
                 cur.update(q)
             self.cmd_tip = self.tip()
+            self.left_hold = {f"left_arm_{k}": cur[f"left_arm_{k}"] for k in range(7)}   # the Cartesian streams of the next pick hold the left arm HERE
             self.seeded = False       # the arm is wherever the trajectory left it: the next pick seeds first
         self._run("joints", body)
+
+    # ---- the base ----------------------------------------------------------------------------------------------------
+    def _wheels(self):
+        pos = self.robot.get_state().position      # Model_A.mobility_idx = [0, 1]: right_wheel, left_wheel
+        return float(pos[0]), float(pos[1])
+
+    def base_pose(self):
+        """(x, y, yaw) of the base relative to where the executor started, from the wheel joints. Called by the status heartbeat too, so
+        it never has more than a fraction of a second of wheel travel to integrate."""
+        with self._odo_lock:
+            return self.odo.update(*self._wheels()).copy()
+
+    def _require_base_home(self):
+        """Perception, servo, reach model and safety checks all assume the base stands where it started."""
+        x, y, yaw = self.base_pose()
+        if not self.odo.at_home():
+            raise TaskError(f"the base is {np.hypot(x, y) * 100:.0f} cm and {np.degrees(yaw):.0f} degrees from its start pose: drive back first (drive home)")
+
+    def _read_footprint(self):
+        """Base and wheel outline from the simulator's ground truth file (src/rby1_vision.py write_gt), else the generous default."""
+        try:
+            return tuple(json.load(open("/isaac-sim/.local/share/ov/data/rby1_gt.json"))["base_footprint"])
+        except (OSError, KeyError, ValueError):
+            return B.FOOTPRINT
+
+    def _send_base(self, v, w):
+        """One SE(2) velocity command (forward speed v [m/s], turn rate w [rad/s]), valid for 0.3 s: if this program dies the base stops by itself."""
+        rby = self.rby
+        rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_mobility_command(rby.MobilityCommandBuilder().set_command(
+            rby.SE2VelocityCommandBuilder().set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(0.3)).set_minimum_time(0.2)
+            .set_velocity(np.array([v, 0.0]), w))))
+        for attempt in (0, 1):
+            if self._base_stream is None:
+                self._base_stream = self.robot.create_command_stream(10)
+            try:
+                self._base_stream.send_command(rc, 200)
+                return
+            except RuntimeError as exc:
+                if "expired" not in str(exc) or attempt:
+                    raise
+                self._base_stream = None
+
+    def _stop_base(self):
+        try:
+            for _ in range(3):
+                self._send_base(0.0, 0.0)
+                time.sleep(0.05)
+        finally:
+            if self._base_stream is not None:
+                self._base_stream.cancel()
+                self._base_stream = None
+
+    def _drive_segment(self, kind, target):
+        """One closed-loop move of the base: a turn of `target` rad or a straight move of `target` m along the current heading."""
+        start = self.base_pose()
+        v_max, acc, v_min, tol = (B.W_MAX, B.A_ANG, B.W_MIN, B.TOL_ANG) if kind == "turn" else (B.V_MAX, B.A_LIN, B.V_MIN, B.TOL_LIN)
+        limit, t0, sign = 5.0 + 3.0 * abs(target) / v_max, time.time(), 1.0 if target >= 0 else -1.0
+        try:
+            while True:
+                t_loop = time.time()
+                self._check()
+                pose = self.base_pose()
+                done = B.wrap(pose[2] - start[2]) if kind == "turn" else float(np.dot(pose[:2] - start[:2], [np.cos(start[2]), np.sin(start[2])]))
+                remaining = target - done
+                if remaining * sign <= tol:
+                    return
+                if time.time() - t0 > limit:
+                    raise TaskError(f"the base did not finish the {kind} within {limit:.0f} s (done {done:.3f} of {target:.3f})")
+                s = sign * B.speed(remaining, v_max, acc, v_min)
+                self._send_base(0.0 if kind == "turn" else s, s if kind == "turn" else 0.0)
+                self._tick(t_loop)
+        finally:
+            self._stop_base()
+            time.sleep(0.3)
+
+    def drive(self, forward=0.0, turn_deg=0.0, home=False):
+        """Roll the base: first turn by `turn_deg` (positive = left), then forward by `forward` m (negative = back); or `home`: back to the start
+        pose. Small steps with hard limits (base_motion.py), checked against the table with the arm where it is, driven closed-loop on the wheel
+        odometry. While the base is away from its start pose the manipulation skills refuse (their frames assume it is there)."""
+        def body():
+            import kinematics
+            self._end_stream()
+            arm = lambda: list(kinematics.all_points(self.state()["joints"]).values())   # noqa: E731 - the arms now, in the base frame
+            if not home:   # one command is checked as a whole (size, distance from the start, table), then done: turn first, then forward
+                turn = float(np.radians(turn_deg))
+                problems = B.check_move(self.base_pose(), float(forward), turn, arm(), self.footprint)
+                if problems:
+                    raise TaskError("; ".join(problems))
+                if abs(turn) > B.TOL_ANG:
+                    self.event(f"drive: turn {turn_deg:+.0f} deg")
+                    self._drive_segment("turn", turn)
+                if abs(forward) > B.TOL_LIN:
+                    self.event(f"drive: forward {forward * 100:+.0f} cm")
+                    self._drive_segment("forward", float(forward))
+            else:          # the way back can be longer than one command: several, each checked on its own
+                t1, d, t2 = B.way_home(self.base_pose())
+                for kind, amount in (("turn", t1), ("forward", d), ("turn", t2)):
+                    big, tol = (B.MAX_TURN, B.TOL_ANG) if kind == "turn" else (B.MAX_FORWARD, B.TOL_LIN)
+                    while abs(amount) > tol:
+                        step = float(np.clip(amount, -big, big))
+                        problems = B.check_move(self.base_pose(), step if kind == "forward" else 0.0, step if kind == "turn" else 0.0, arm(), self.footprint)
+                        if problems:
+                            raise TaskError("; ".join(problems))
+                        self.event(f"drive home: {kind} {np.degrees(step):+.0f} deg" if kind == "turn" else f"drive home: forward {step * 100:+.0f} cm")
+                        self._drive_segment(kind, step)
+                        amount -= step
+            x, y, yaw = self.base_pose()
+            self.event(f"base at ({x:.3f}, {y:.3f}), heading {np.degrees(yaw):.1f} deg")
+        self._run("drive", body)
 
     def _align_over(self, base):
         """Hover loop over the `base` box: drive the held box's centre onto the base box's centre. Both are measured by the stereo rig
