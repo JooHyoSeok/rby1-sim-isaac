@@ -1,0 +1,192 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Course scene add-on: stereo rig, wrist cameras, red/blue/yellow landmarks and ROS 2 publishing.
+
+Enabled with ``--vision``. Everything here is visual or kinematic (no new rigid bodies except a static table), so
+the robot dynamics and the rby1-sdk UDP path are untouched. All poses below are first guesses in metres: check them
+in a rendered frame and tune (the wrist camera and EE landmark poses depend on the gripper geometry).
+
+ROS 2 topics (sim-time stamped, published at the render rate, so pass ``--render-hz`` when headless):
+  /clock, /rby1/joint_states
+  /rby1/{stereo_left,stereo_right,wrist_left,wrist_right}/image_raw and /camera_info
+  /rby1/gt/tf   ground-truth poses of cameras, EE links and landmark roots w.r.t. the robot root (evaluation only)
+"""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
+
+ROBOT_ROOT = "/World/RBY1"
+WRIST_LINKS = {"left": "link_left_arm_6", "right": "link_right_arm_6"}
+
+IMAGE_W, IMAGE_H = (int(v) for v in os.environ.get("RBY1_CAM_RES", "640x480").split("x"))
+FOCAL_MM, H_APERTURE_MM = 15.0, 20.955  # fx = IMAGE_W * FOCAL_MM / H_APERTURE_MM
+
+# External stereo rig: eye centre, look-at point, baseline. Override with RBY1_STEREO_EYE="x,y,z".
+STEREO_EYE = np.array([float(v) for v in os.environ.get("RBY1_STEREO_EYE", "1.4,0.0,1.2").split(",")])
+STEREO_TARGET = np.array([0.5, 0.0, 0.9])
+STEREO_BASELINE = 0.12
+
+# Wrist camera pose in the wrist link frame: (translation, look direction, up). Guess, tune on a rendered frame.
+WRIST_CAM = {
+    "left": (np.array([0.0, -0.09, 0.03]), np.array([0.0, 0.0, 1.0]), np.array([0.0, -1.0, 0.0])),
+    "right": (np.array([0.0, 0.09, 0.03]), np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0])),
+}
+
+SPHERE_R = 0.012
+# Asymmetric red landmarks P1..P4 in the wrist link frame (P1 is the single sphere for eye-to-hand calibration).
+EE_LANDMARKS = [(0.04, 0.0, 0.05), (-0.04, 0.03, 0.06), (0.0, -0.05, 0.08), (0.03, 0.05, 0.10)]
+# Table, object, object landmarks Q1..Q4 (object frame) and the R/B/Y calibration target (table frame, on top).
+TABLE_CENTER, TABLE_SIZE = (0.6, 0.0, 0.35), (0.5, 0.8, 0.7)
+OBJECT_POS, OBJECT_SIZE = (0.55, -0.15, 0.7 + 0.04), (0.08, 0.08, 0.08)  # centre of the cube resting on the table
+OBJECT_LANDMARKS = [(0.0, 0.0, 0.06), (0.05, 0.0, 0.0), (-0.03, 0.05, 0.0), (-0.03, -0.05, 0.0)]
+TARGET_SPHERES = {"R": ((0.65, 0.25, 0.7 + SPHERE_R), (1, 0, 0)),
+                  "B": ((0.75, 0.30, 0.7 + SPHERE_R), (0, 0, 1)),
+                  "Y": ((0.70, 0.18, 0.7 + SPHERE_R), (1, 1, 0)),
+                  "R2": ((0.80, 0.20, 0.7 + SPHERE_R + 0.03), (1, 0, 0))}  # 4th, off-plane: removes P3P ambiguity
+
+
+def _material(stage, path: str, rgb) -> UsdShade.Material:
+    mat = UsdShade.Material.Define(stage, path)
+    shader = UsdShade.Shader.Define(stage, path + "/Shader")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*rgb))
+    shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*rgb) * 0.5)  # stable under lighting
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(1.0)
+    mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    return mat
+
+
+def _sphere(stage, path: str, pos, rgb, mat) -> None:
+    s = UsdGeom.Sphere.Define(stage, path)
+    s.GetRadiusAttr().Set(SPHERE_R)
+    UsdGeom.XformCommonAPI(s).SetTranslate(Gf.Vec3d(*pos))
+    UsdShade.MaterialBindingAPI(s.GetPrim()).Bind(mat)
+
+
+def _cuboid(stage, path: str, center, size, rgb, static_collider: bool) -> None:
+    c = UsdGeom.Cube.Define(stage, path)
+    c.GetSizeAttr().Set(1.0)
+    api = UsdGeom.XformCommonAPI(c)
+    api.SetTranslate(Gf.Vec3d(*center))
+    api.SetScale(Gf.Vec3f(*size))
+    c.GetDisplayColorAttr().Set([Gf.Vec3f(*rgb)])
+    if static_collider:
+        UsdPhysics.CollisionAPI.Apply(c.GetPrim())
+
+
+def _look_at_matrix(eye, forward, up) -> Gf.Matrix4d:
+    """Camera-to-parent transform for a USD camera (looks along -Z, +Y up)."""
+    eye, forward, up = (Gf.Vec3d(*map(float, v)) for v in (eye, forward, up))
+    return Gf.Matrix4d().SetLookAt(eye, eye + forward, up).GetInverse()
+
+
+def _camera(stage, path: str, matrix: Gf.Matrix4d) -> None:
+    cam = UsdGeom.Camera.Define(stage, path)
+    cam.GetFocalLengthAttr().Set(FOCAL_MM)
+    cam.GetHorizontalApertureAttr().Set(H_APERTURE_MM)
+    cam.GetVerticalApertureAttr().Set(H_APERTURE_MM * IMAGE_H / IMAGE_W)
+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10.0))
+    cam.AddTransformOp().Set(matrix)
+
+
+def build_scene(stage) -> dict[str, str]:
+    """Create cameras, landmarks, table and object. Returns {topic name: camera prim path}."""
+    red = _material(stage, "/World/Looks/red", (1, 0, 0))
+    mats = {(1, 0, 0): red, (0, 0, 1): _material(stage, "/World/Looks/blue", (0, 0, 1)),
+            (1, 1, 0): _material(stage, "/World/Looks/yellow", (1, 1, 0))}
+
+    forward = STEREO_TARGET - STEREO_EYE
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, [0.0, 0.0, 1.0])
+    right = right / np.linalg.norm(right)
+    cams = {}
+    UsdGeom.Xform.Define(stage, "/World/StereoRig")
+    for name, sign in (("stereo_left", -1), ("stereo_right", 1)):
+        path = f"/World/StereoRig/{name}"
+        _camera(stage, path, _look_at_matrix(STEREO_EYE + sign * right * STEREO_BASELINE / 2, forward, [0, 0, 1]))
+        cams[name] = path
+    for side, link in WRIST_LINKS.items():
+        pos, look, up = WRIST_CAM[side]
+        path = f"{ROBOT_ROOT}/{link}/wrist_cam"
+        _camera(stage, path, _look_at_matrix(pos, look, up))
+        cams[f"wrist_{side}"] = path
+        for i, p in enumerate(EE_LANDMARKS, 1):
+            _sphere(stage, f"{ROBOT_ROOT}/{link}/P{i}", p, (1, 0, 0), red)
+
+    _cuboid(stage, "/World/Table", TABLE_CENTER, TABLE_SIZE, (0.6, 0.5, 0.4), static_collider=True)
+    UsdGeom.Xform.Define(stage, "/World/Object")  # unscaled parent so the landmark spheres stay round
+    UsdGeom.XformCommonAPI(UsdGeom.Xform(stage.GetPrimAtPath("/World/Object"))).SetTranslate(Gf.Vec3d(*OBJECT_POS))
+    _cuboid(stage, "/World/Object/body", (0, 0, 0), OBJECT_SIZE, (0.8, 0.8, 0.8), static_collider=False)
+    for i, p in enumerate(OBJECT_LANDMARKS, 1):
+        _sphere(stage, f"/World/Object/Q{i}", p, (1, 0, 0), red)
+    for name, (p, rgb) in TARGET_SPHERES.items():
+        _sphere(stage, f"/World/Target/{name}", p, rgb, mats[rgb])
+    return cams
+
+
+def build_ros_graph(cams: dict[str, str]) -> None:
+    """One execution graph: clock, joint states, GT transforms, and image + camera_info per camera."""
+    import omni.graph.core as og
+    import usdrt.Sdf
+
+    keys = og.Controller.Keys
+    nodes = [
+        ("Tick", "omni.graph.action.OnPlaybackTick"),
+        ("Context", "isaacsim.ros2.bridge.ROS2Context"),
+        ("SimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+        ("Clock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+        ("ReadJoints", "isaacsim.sensors.physics.IsaacReadJointState"),
+        ("PubJoints", "isaacsim.ros2.bridge.ROS2PublishJointState"),
+        ("GtTf", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+    ]
+    conn = [
+        ("Tick.outputs:tick", "Clock.inputs:execIn"), ("Context.outputs:context", "Clock.inputs:context"),
+        ("SimTime.outputs:simulationTime", "Clock.inputs:timeStamp"),
+        ("Tick.outputs:tick", "ReadJoints.inputs:execIn"), ("ReadJoints.outputs:execOut", "PubJoints.inputs:execIn"),
+        ("Context.outputs:context", "PubJoints.inputs:context"),
+        ("Tick.outputs:tick", "GtTf.inputs:execIn"), ("Context.outputs:context", "GtTf.inputs:context"),
+        ("SimTime.outputs:simulationTime", "GtTf.inputs:timeStamp"),
+    ]
+    conn += [(f"ReadJoints.outputs:{a}", f"PubJoints.inputs:{a}") for a in (
+        "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
+        "sensorTime")]
+    ee_links = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()]
+    gt_targets = list(cams.values()) + ee_links + ["/World/Object", "/World/Target"]
+    values = [
+        ("ReadJoints.inputs:prim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
+        ("PubJoints.inputs:topicName", "rby1/joint_states"),
+        ("GtTf.inputs:parentPrim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
+        ("GtTf.inputs:targetPrims", [usdrt.Sdf.Path(p) for p in gt_targets]),
+        ("GtTf.inputs:topicName", "rby1/gt/tf"),
+    ]
+    for name, path in cams.items():
+        nodes += [(f"RP_{name}", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
+                  (f"Img_{name}", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                  (f"Info_{name}", "isaacsim.ros2.bridge.ROS2CameraInfoHelper")]
+        conn += [("Tick.outputs:tick", f"RP_{name}.inputs:execIn"),
+                 (f"RP_{name}.outputs:execOut", f"Img_{name}.inputs:execIn"),
+                 (f"RP_{name}.outputs:execOut", f"Info_{name}.inputs:execIn"),
+                 ("Context.outputs:context", f"Img_{name}.inputs:context"),
+                 ("Context.outputs:context", f"Info_{name}.inputs:context"),
+                 (f"RP_{name}.outputs:renderProductPath", f"Img_{name}.inputs:renderProductPath"),
+                 (f"RP_{name}.outputs:renderProductPath", f"Info_{name}.inputs:renderProductPath")]
+        values += [(f"RP_{name}.inputs:cameraPrim", [usdrt.Sdf.Path(path)]),
+                   (f"RP_{name}.inputs:width", IMAGE_W), (f"RP_{name}.inputs:height", IMAGE_H),
+                   (f"Img_{name}.inputs:topicName", f"rby1/{name}/image_raw"), (f"Img_{name}.inputs:type", "rgb"),
+                   (f"Img_{name}.inputs:frameId", name),
+                   (f"Info_{name}.inputs:topicName", f"rby1/{name}/camera_info"), (f"Info_{name}.inputs:frameId", name)]
+    og.Controller.edit({"graph_path": "/ROS_RBY1", "evaluator_name": "execution"},
+                       {keys.CREATE_NODES: nodes, keys.CONNECT: conn, keys.SET_VALUES: values})
+
+
+def setup(stage_getter) -> None:
+    """Enable the ROS 2 bridge, build the scene and the publishing graph (call after the robot is in the stage)."""
+    from isaacsim.core.utils.extensions import enable_extension
+
+    enable_extension("isaacsim.ros2.bridge")
+    stage = stage_getter()
+    cams = build_scene(stage)
+    build_ros_graph(cams)
+    print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")

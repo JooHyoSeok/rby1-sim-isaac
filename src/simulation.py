@@ -54,6 +54,7 @@ class Simulation:
         headless: bool = False,
         physics_device: str = "gpu",
         render_hz: float | None = None,
+        vision: bool = False,
     ):
         # Imports kept lazy: many of these depend on SimulationApp being initialised.
         from isaacsim.core.api import World
@@ -146,6 +147,11 @@ class Simulation:
             gripper_server=self.gripper_server,
         )
         self.world.add_task(self.task)
+        if vision:
+            import omni.usd
+            import rby1_vision
+
+            rby1_vision.setup(lambda: omni.usd.get_context().get_stage())
         self.robot = None
         self.reset_needed = False
 
@@ -503,6 +509,8 @@ def _build_argparser():
                    help="PhysX pipeline. 'cpu' is faster for this single articulation in lockstep mode")
     p.add_argument("--render-hz", type=float, default=None,
                    help="Render rate [Hz] (default 30 with the GUI, 0 = never when headless)")
+    p.add_argument("--vision", action="store_true",
+                   help="Add the course stereo/wrist cameras, landmarks and ROS 2 publishers (see rby1_vision.py)")
     p.add_argument("--gripper-state-port", type=int, default=GRIPPER_STATE_PORT,
                    help="Port for sending gripper state")
     return p
@@ -517,6 +525,8 @@ def main() -> None:
     if args.sim_gripper and not gripper_enabled:
         print("[Simulation] --sim-gripper ignored because --no-gripper is set.")
 
+    if args.vision and args.headless and args.render_hz is None:
+        args.render_hz = 15.0  # camera images need rendering; headless defaults to none
     simulation_app = SimulationApp({"headless": args.headless})
 
     simulation = Simulation(
@@ -535,6 +545,7 @@ def main() -> None:
         headless=args.headless,
         physics_device=args.physics_device,
         render_hz=args.render_hz,
+        vision=args.vision,
     )
     simulation.initial_reset()
 
