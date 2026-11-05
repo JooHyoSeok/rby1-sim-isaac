@@ -128,6 +128,8 @@ class Perception:
 
 
 class GraspRobot:
+    _driving, _latched = False, None     # (class defaults: the offline tests build the object without __init__)
+
     def __init__(self, perception: Perception, event=lambda text: print(text, flush=True)):
         import rby1_sdk as rby
         from gripper_example import Gripper
@@ -161,7 +163,8 @@ class GraspRobot:
         self.odo, self._odo_lock = B.Odometry(*self._wheels()), threading.Lock()   # the base starts at the world origin, facing +x
         self.footprint = self._read_footprint()
         self.perception.base_pose = self.base_pose      # from here on the perception hands the boxes on in the base frame
-        self.gt_base = None    # (pose, wall time) of the simulator's true base pose, preferred while it keeps arriving
+        self.gt_base = None    # (pose, wall time) of the simulator's base pose, trusted only while the base drives (see base_pose)
+        self._driving, self._latched = False, None
         self._base_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._base_rx.bind(("127.0.0.1", C.PORT_BASE_POSE))
         threading.Thread(target=self._listen_base, daemon=True).start()
@@ -214,7 +217,8 @@ class GraspRobot:
         names = list(self.rby.Model_A().robot_joint_names)
         q = np.array(self.robot.get_state().position)
         return {"joints": {n: round(float(v), 5) for n, v in zip(names, q)}, "tip": self.tip("right").round(4).tolist(),
-                "tip_left": self.tip("left").round(4).tolist(), "robot": self.status()}
+                "tip_left": self.tip("left").round(4).tolist(), "ee_right": self.ee_pose("right").round(5).tolist(),
+                "ee_left": self.ee_pose("left").round(5).tolist(), "robot": self.status()}
 
     def scene(self):
         """What the robot sees: the boxes from the stereo rig in the BASE frame (centre, yaw, what each rests on) and its own state (robot.base = where
@@ -266,7 +270,7 @@ class GraspRobot:
         for joint, q in self.hold["left" if self.side == "right" else "right"].items():      # the other arm stays where it is
             cart.add_joint_position_target(joint, float(q))
         rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
-            rby.BodyCommandBuilder().set_command(cart)))
+            rby.BodyCommandBuilder().set_command(cart)).set_mobility_command(self._mobility_hold()))
         for attempt in (0, 1):
             if self.stream is None:
                 self.stream = self.robot.create_command_stream(10)
@@ -278,11 +282,18 @@ class GraspRobot:
                     raise
                 self.stream = None   # a stream that sat idle (between two tasks) expires: open a new one and send again
 
+    def _mobility_hold(self):
+        """Zero planar velocity for the wheels, sent along with every arm and torso command: the unbraked base rolls away otherwise (it drifted 17 cm and 6
+        degrees during one left-arm pick and place, from the reaction of the arm and torso motions)."""
+        rby = self.rby
+        return rby.MobilityCommandBuilder().set_command(rby.SE2VelocityCommandBuilder().set_command_header(
+            rby.CommandHeaderBuilder().set_control_hold_time(1.0)).set_minimum_time(0.2).set_velocity(np.array([0.0, 0.0]), 0.0))
+
     def _joint_move(self, body_builder, name, head_builder=None):
         """Blocking joint-space move that can be aborted. `head_builder` (a HeadCommandBuilder) moves the head along with the body."""
         rby = self.rby
         self._end_stream()
-        components = rby.ComponentBasedCommandBuilder()
+        components = rby.ComponentBasedCommandBuilder().set_mobility_command(self._mobility_hold())
         if body_builder is not None:
             components.set_body_command(body_builder)
         if head_builder is not None:
@@ -335,6 +346,18 @@ class GraspRobot:
             yield
         finally:
             self._depth -= 1
+
+    def _driving_run(self, name, body):
+        """A task that moves the base: the simulator's base pose is trusted while it runs, and its last value stays afterwards."""
+        def wrapped():
+            self._driving = True
+            try:
+                return body()
+            finally:
+                time.sleep(0.3)
+                self.base_pose()                   # latch the final pose before the flag goes down
+                self._driving = False
+        self._run(name, wrapped)
 
     def _run(self, name, fn, *args, **kw):
         """Run a task body: clears the abort flag (outermost call only), recovers after a fault or an abort, leaves the robot ready for
@@ -661,9 +684,13 @@ class GraspRobot:
         the odometry never has more than a fraction of a second of wheel travel to integrate."""
         with self._odo_lock:
             odo = self.odo.update(*self._wheels()).copy()
-            if self.gt_base is not None and time.time() - self.gt_base[1] < 0.5:
-                self.odo.pose = self.gt_base[0].copy()      # and the fallback carries on from here
-                return self.gt_base[0].copy()
+            if self.gt_base is not None and time.time() - self.gt_base[1] < 0.5 and self._driving:
+                self._latched = self.gt_base[0].copy()      # driving: the simulator's pose (the wheels slip when it turns, odometry is off by 2x)
+                self.odo.pose = self._latched.copy()        # and the fallback carries on from here
+                return self._latched.copy()
+            if self._latched is not None:                   # not driving: the base stands where the last drive left it. The pose the simulator reports
+                self.odo.pose = self._latched.copy()        # jumped by 10-20 cm during arm motions while the transform tree and the forward kinematics
+                return self._latched.copy()                 # of the arms show the base standing still
             return odo
 
     def _require_table_clear_for_seed(self):
@@ -769,7 +796,7 @@ class GraspRobot:
                 time.sleep(1.0)
             p = self.base_pose()
             self.event(f"raw end pose ({p[0]:.3f}, {p[1]:.3f}, {np.degrees(p[2]):.1f} deg)")
-        self._run("drive_raw", body)
+        self._driving_run("drive_raw", body)
 
     def drive(self, forward=0.0, turn_deg=0.0, home=False):
         """Roll the base: first turn by `turn_deg` (positive = left), then forward by `forward` m (negative = back); or `home`: back to the start
@@ -811,7 +838,7 @@ class GraspRobot:
                                     f"(the simulated base turns poorly: its turns swing the base about 20-60 cm); the manipulation skills stay refused")
             x, y, yaw = self.base_pose()
             self.event(f"base at ({x:.3f}, {y:.3f}), heading {np.degrees(yaw):.1f} deg")
-        self._run("drive", body)
+        self._driving_run("drive", body)
 
     def _align_over(self, base):
         """Hover loop over the `base` box: drive the held box's centre onto the base box's centre. Both are measured by the stereo rig
@@ -916,6 +943,8 @@ class GraspRobot:
                                text=[f"continuous servo to the {color} box, measured by the {src}",
                                      f"lateral error {lat[0] * 1000:+.1f} / {lat[1] * 1000:+.1f} mm, {remaining * 1000:.0f} mm to go"], **view)
                 if ok_ticks >= int(0.25 * RATE):
+                    self.event(f"servo arrived ({src}, {self.side} arm): fingertips {np.round(self.tip_of(T_ee), 3).tolist()}, the box centre measured at "
+                               f"{np.round(c_world, 3).tolist()} (error in the hand frame {lat[0] * 1000:+.1f} / {lat[1] * 1000:+.1f} mm, {remaining * 1000:.0f} mm to go)")
                     return
             self._stream_to(self.cmd_tip)
             tick += 1

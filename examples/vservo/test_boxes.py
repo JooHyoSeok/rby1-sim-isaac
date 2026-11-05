@@ -51,7 +51,7 @@ DISTRACTORS = [(100, 380, 540, 470, (20, 70, 130)),     # blue floor, g/b ~ 0.5
 
 def check(scene, label, tol=0.004):
     """scene: {colour: (centre, yaw, hidden landmark indices)} -> every box found with its own colour, within tol [m] and ~ yaw."""
-    sph, truth = [(np.array([0.75, 0.30, 0.732]), "blue"), (np.array([0.70, 0.18, 0.732]), "yellow")], {}   # the calibration spheres
+    sph, truth = [(np.array([1.08, 0.24, 0.732]), "blue"), (np.array([1.02, 0.16, 0.732]), "yellow")], {}   # the calibration spheres (far end of the table)
     for color, (c, yaw, hidden) in scene.items():
         pts, R = landmarks(color, c, yaw, hidden)
         sph += pts

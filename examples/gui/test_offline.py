@@ -679,26 +679,29 @@ def test_drive():
     r.drive(turn_deg=-30)
     assert abs(np.degrees(r.base_pose()[2]) + 30) < 1.0 and abs(np.degrees(sim.pose[2]) + 30) < 1.0, r.base_pose()
     # the seed pose needs room ahead of the base: measured to the table where it really is, from wherever the base stands
-    r.seeded, r.squatted, r.gt_base = False, False, (np.array([0.2, 0.0, 0.0]), __import__("time").time())
+    r.seeded, r.squatted, r._latched = False, False, np.array([0.2, 0.0, 0.0])
     try:
         r._require_table_clear_for_seed()
         raise AssertionError("expected a TaskError")                                                  # the base stands 20 cm closer to the table
     except grasp_core.TaskError as exc:
         assert "cm ahead of the base" in str(exc), str(exc)
-    r.gt_base = None
+    r._latched = None
     r.odo = B.Odometry(*sim.q, pose=tuple(sim.pose))                                                  # the test's fake true pose was swapped for a made-up one above
     r.drive(home=True)
     x, y, yaw = r.base_pose()
     assert np.hypot(x, y) < B.HOME_TOL_LIN and abs(yaw) < B.HOME_TOL_ANG and r.odo.at_home(), (x, y, yaw)
     r._require_table_clear_for_seed()                                                                 # at home again: the table is 58 cm ahead: fine
-    # the simulator's true pose wins while it is fresh (the wheels slip when turning), the odometry takes over when it stops
+    # the simulator's pose is trusted only while the base drives (it jumps by 10-20 cm during arm motions); afterwards the last value stays
     import time as _time
     r.gt_base = (np.array([0.02, -0.01, 0.1]), _time.time())
-    assert np.allclose(r.base_pose(), [0.02, -0.01, 0.1]) and not r.odo.at_home()                 # 0.1 rad = 5.7 degrees off
-    r.gt_base = (np.array([0.0, 0.0, 0.0]), _time.time() - 5.0)                                    # stale: back to the wheels
-    assert np.allclose(r.base_pose(), r.odo.pose) and np.allclose(r.base_pose(), [0.02, -0.01, 0.1], atol=1e-6)
-    r.odo = B.Odometry(*sim.q)
-    r.gt_base = None
+    assert np.allclose(r.base_pose(), r.odo.pose)                                                  # not driving: the simulator's value is ignored
+    r._driving = True
+    assert np.allclose(r.base_pose(), [0.02, -0.01, 0.1]) and not r.odo.at_home()                  # driving: 0.1 rad = 5.7 degrees off
+    r._driving = False
+    r.gt_base = (np.array([0.5, 0.5, 0.5]), _time.time())                                          # a wild value while the arms work: ignored, the latched pose stays
+    assert np.allclose(r.base_pose(), [0.02, -0.01, 0.1])
+    r._driving, r._latched, r.gt_base = False, None, None
+    r.odo = B.Odometry(*sim.q, pose=tuple(sim.pose))
     # refused: too far, into the table; nothing is sent
     sent = len(sim.sent)
     for kw, text in (({"forward": 0.5}, "at most 30 cm"), ({"forward": 0.3}, "run into the table"), ({"turn_deg": 120}, "at most 90 degrees")):

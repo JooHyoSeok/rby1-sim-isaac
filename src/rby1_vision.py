@@ -63,10 +63,14 @@ OBJECT_LANDMARKS = [(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.05, 0.0), (-
 BOXES = {"blue": {"rgb": (0.0, 0.0, 1.0), "body": (0.35, 0.5, 1.0), "xy": (0.62, -0.34)},
          "green": {"rgb": (0.0, 1.0, 0.0), "body": (0.45, 1.0, 0.45), "xy": (0.62, -0.22)},
          "yellow": {"rgb": (1.0, 1.0, 0.0), "body": (1.0, 0.95, 0.55), "xy": (0.62, -0.10)}}
-TARGET_SPHERES = {"R": ((0.65, 0.25, TABLE_TOP + SPHERE_R), (1, 0, 0)),
-                  "B": ((0.75, 0.30, TABLE_TOP + SPHERE_R), (0, 0, 1)),
-                  "Y": ((0.70, 0.18, TABLE_TOP + SPHERE_R), (1, 1, 0)),
-                  "R2": ((0.80, 0.20, TABLE_TOP + SPHERE_R + 0.03), (1, 0, 0))}  # 4th, off-plane: removes P3P ambiguity
+# The R/B/Y calibration target (HW7), off by default: its blue and yellow spheres have the colours of the blue and yellow boxes' landmarks, and the
+# wrist camera matched a sphere as a landmark of the box next to it (and later, from afar): the servo measured the box 4 cm off and missed the grasp.
+# Set RBY1_CALIB_TARGET=1 in the simulator's environment to build it for the calibration data collection (examples/calibration_data).
+CALIBRATION_TARGET = os.environ.get("RBY1_CALIB_TARGET", "0") == "1"
+TARGET_SPHERES = {"R": ((1.00, 0.30, TABLE_TOP + SPHERE_R), (1, 0, 0)),
+                  "B": ((1.08, 0.24, TABLE_TOP + SPHERE_R), (0, 0, 1)),
+                  "Y": ((1.02, 0.16, TABLE_TOP + SPHERE_R), (1, 1, 0)),
+                  "R2": ((1.10, 0.14, TABLE_TOP + SPHERE_R + 0.03), (1, 0, 0))}  # 4th, off-plane: removes P3P ambiguity
 
 
 def _material(stage, path: str, rgb) -> UsdShade.Material:
@@ -205,7 +209,7 @@ def build_scene(stage) -> dict[str, str]:
             friction, UsdShade.Tokens.weakerThanDescendants, "physics")
         for i, p in enumerate(OBJECT_LANDMARKS, 1):
             _sphere(stage, f"{path}/Q{i}", p, box["rgb"], mats[box["rgb"]])
-    for name, (p, rgb) in TARGET_SPHERES.items():
+    for name, (p, rgb) in (TARGET_SPHERES.items() if CALIBRATION_TARGET else ()):
         _sphere(stage, f"/World/Target/{name}", p, rgb, mats[rgb])
     return cams
 
@@ -301,7 +305,7 @@ def write_gt(stage, path: str) -> None:
           "wrist": {}, "ee_landmarks_in_wrist_link": {f"P{i}": p for i, p in enumerate(EE_LANDMARKS, 1)},
           "boxes_world": {n: _mat(xf(f"/World/Box_{n}").ComputeLocalToWorldTransform(0)) for n in BOXES},
           "box_landmarks_in_box": {f"Q{i}": p for i, p in enumerate(OBJECT_LANDMARKS, 1)},
-          "target_spheres_world": {n: p for n, (p, _) in TARGET_SPHERES.items()}, "sphere_radius": SPHERE_R}
+          "target_spheres_world": {n: p for n, (p, _) in TARGET_SPHERES.items()} if CALIBRATION_TARGET else {}, "sphere_radius": SPHERE_R}
     for side, link in WRIST_LINKS.items():
         link_path = f"{ROBOT_ROOT}/{link}"
         link_to_world = xf(link_path).ComputeLocalToWorldTransform(0)
@@ -383,8 +387,9 @@ def publish_base_pose(robot) -> None:
     try:
         if _base_tx is None:
             _base_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        base = getattr(robot, "base", None) or robot
-        pos, quat = base.get_world_pose()
+        # The articulation's own root pose (the physics view): the pose of robot.base, a rigid-prim wrapper, jumped by 10-20 cm during arm motions
+        # while the transform tree (and the rendered scene) showed the base standing still, which made the executor convert every box wrongly.
+        pos, quat = robot.get_world_pose()
         w, x, y, z = (float(v) for v in quat)
         yaw = float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
         _base_tx.sendto(json.dumps({"base": [float(pos[0]), float(pos[1]), yaw], "t": now}).encode(), ("127.0.0.1", BASE_POSE_PORT))
