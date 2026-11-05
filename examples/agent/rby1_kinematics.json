@@ -1,0 +1,581 @@
+{
+ "source": "model_v_1_2_a.urdf",
+ "root": "base",
+ "joints": [
+  {
+   "name": "left_wheel",
+   "type": "continuous",
+   "parent": "base",
+   "child": "wheel_l",
+   "xyz": [
+    0.228,
+    0.264999986,
+    0.100000001
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "lower": null,
+   "upper": null
+  },
+  {
+   "name": "right_wheel",
+   "type": "continuous",
+   "parent": "base",
+   "child": "wheel_r",
+   "xyz": [
+    0.228,
+    -0.264999986,
+    0.100000001
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "lower": null,
+   "upper": null
+  },
+  {
+   "name": "torso_0",
+   "type": "revolute",
+   "parent": "base",
+   "child": "link_torso_0",
+   "xyz": [
+    0.0,
+    0.0,
+    0.280499995
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    1.0,
+    0.0,
+    0.0
+   ],
+   "lower": -0.261799388,
+   "upper": 0.261799388
+  },
+  {
+   "name": "torso_1",
+   "type": "revolute",
+   "parent": "link_torso_0",
+   "child": "link_torso_1",
+   "xyz": [
+    0,
+    0,
+    0
+   ],
+   "rpy": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -0.523598776,
+   "upper": 1.57079633
+  },
+  {
+   "name": "torso_2",
+   "type": "revolute",
+   "parent": "link_torso_1",
+   "child": "link_torso_2",
+   "xyz": [
+    0.0,
+    0.0,
+    0.349999994
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -2.61799388,
+   "upper": 1.57079633
+  },
+  {
+   "name": "torso_3",
+   "type": "revolute",
+   "parent": "link_torso_2",
+   "child": "link_torso_3",
+   "xyz": [
+    0.0,
+    0.0,
+    0.349999964
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -0.785398163,
+   "upper": 1.57079633
+  },
+  {
+   "name": "torso_4",
+   "type": "revolute",
+   "parent": "link_torso_3",
+   "child": "link_torso_4",
+   "xyz": [
+    0.0,
+    0.0,
+    2.98023224e-08
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    1.0,
+    0.0,
+    0.0
+   ],
+   "lower": -0.523598776,
+   "upper": 0.523598776
+  },
+  {
+   "name": "torso_5",
+   "type": "revolute",
+   "parent": "link_torso_4",
+   "child": "link_torso_5",
+   "xyz": [
+    0.0,
+    0.0,
+    0.309426546
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -2.35619449,
+   "upper": 2.35619449
+  },
+  {
+   "name": "head_base",
+   "type": "fixed",
+   "parent": "link_torso_5",
+   "child": "link_head_0",
+   "xyz": [
+    0.0219999999,
+    0.0,
+    0.120073453
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    1,
+    0,
+    0
+   ],
+   "lower": null,
+   "upper": null
+  },
+  {
+   "name": "left_arm_0",
+   "type": "revolute",
+   "parent": "link_torso_5",
+   "child": "link_left_arm_0",
+   "xyz": [
+    0.0,
+    0.219999999,
+    0.0800734535
+   ],
+   "rpy": [
+    -2.7925268,
+    0.34906588,
+    -1.57079641
+   ],
+   "axis": [
+    -1.0,
+    0.0,
+    0.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "right_arm_0",
+   "type": "revolute",
+   "parent": "link_torso_5",
+   "child": "link_right_arm_0",
+   "xyz": [
+    0.0,
+    -0.219999999,
+    0.0800734535
+   ],
+   "rpy": [
+    2.7925268,
+    -0.34906588,
+    -1.57079641
+   ],
+   "axis": [
+    -1.0,
+    0.0,
+    0.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "head_0",
+   "type": "revolute",
+   "parent": "link_head_0",
+   "child": "link_head_1",
+   "xyz": [
+    0.0,
+    0.0,
+    0.0799999833
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -1.57079633,
+   "upper": 1.57079633
+  },
+  {
+   "name": "left_arm_1",
+   "type": "revolute",
+   "parent": "link_left_arm_0",
+   "child": "link_left_arm_1",
+   "xyz": [
+    -7.6447465e-09,
+    -7.18371129e-09,
+    -1.97370844e-08
+   ],
+   "rpy": [
+    2.7925268,
+    -0.34906588,
+    -1.57079641
+   ],
+   "axis": [
+    1.0,
+    0.0,
+    0.0
+   ],
+   "lower": 0.0,
+   "upper": 3.14159265
+  },
+  {
+   "name": "right_arm_1",
+   "type": "revolute",
+   "parent": "link_right_arm_0",
+   "child": "link_right_arm_1",
+   "xyz": [
+    7.6447465e-09,
+    7.18371129e-09,
+    -1.97370844e-08
+   ],
+   "rpy": [
+    -2.7925268,
+    0.34906588,
+    -1.57079641
+   ],
+   "axis": [
+    1.0,
+    0.0,
+    0.0
+   ],
+   "lower": -3.14159265,
+   "upper": 0.0
+  },
+  {
+   "name": "head_1",
+   "type": "revolute",
+   "parent": "link_head_1",
+   "child": "link_head_2",
+   "xyz": [
+    0.0,
+    0.0,
+    4.47034836e-08
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -1.57079633,
+   "upper": 1.57079633
+  },
+  {
+   "name": "left_arm_2",
+   "type": "revolute",
+   "parent": "link_left_arm_1",
+   "child": "link_left_arm_2",
+   "xyz": [
+    0,
+    0,
+    0
+   ],
+   "rpy": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "right_arm_2",
+   "type": "revolute",
+   "parent": "link_right_arm_1",
+   "child": "link_right_arm_2",
+   "xyz": [
+    0,
+    0,
+    0
+   ],
+   "rpy": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "left_arm_3",
+   "type": "revolute",
+   "parent": "link_left_arm_2",
+   "child": "link_left_arm_3",
+   "xyz": [
+    0.0309999995,
+    0.0,
+    -0.275999993
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -2.61799388,
+   "upper": 0.0
+  },
+  {
+   "name": "right_arm_3",
+   "type": "revolute",
+   "parent": "link_right_arm_2",
+   "child": "link_right_arm_3",
+   "xyz": [
+    0.0309999995,
+    0.0,
+    -0.275999993
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -2.61799388,
+   "upper": 0.0
+  },
+  {
+   "name": "left_arm_4",
+   "type": "revolute",
+   "parent": "link_left_arm_3",
+   "child": "link_left_arm_4",
+   "xyz": [
+    -0.0309999995,
+    0.0,
+    -0.256000042
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "right_arm_4",
+   "type": "revolute",
+   "parent": "link_right_arm_3",
+   "child": "link_right_arm_4",
+   "xyz": [
+    -0.0309999995,
+    0.0,
+    -0.256000042
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -3.14159265,
+   "upper": 3.14159265
+  },
+  {
+   "name": "left_arm_5",
+   "type": "revolute",
+   "parent": "link_left_arm_4",
+   "child": "link_left_arm_5",
+   "xyz": [
+    0.0,
+    0.0,
+    -2.98023224e-08
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -1.57079633,
+   "upper": 1.91986218
+  },
+  {
+   "name": "right_arm_5",
+   "type": "revolute",
+   "parent": "link_right_arm_4",
+   "child": "link_right_arm_5",
+   "xyz": [
+    0.0,
+    0.0,
+    -2.98023224e-08
+   ],
+   "rpy": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "lower": -1.57079633,
+   "upper": 1.91986218
+  },
+  {
+   "name": "left_arm_6",
+   "type": "revolute",
+   "parent": "link_left_arm_5",
+   "child": "link_left_arm_6",
+   "xyz": [
+    0,
+    0,
+    0
+   ],
+   "rpy": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -2.70526034,
+   "upper": 2.70526034
+  },
+  {
+   "name": "right_arm_6",
+   "type": "revolute",
+   "parent": "link_right_arm_5",
+   "child": "link_right_arm_6",
+   "xyz": [
+    0,
+    0,
+    0
+   ],
+   "rpy": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "lower": -2.70526034,
+   "upper": 2.70526034
+  }
+ ]
+}

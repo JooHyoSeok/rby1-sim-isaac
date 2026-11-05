@@ -5,7 +5,8 @@
   planner.py "stack all three boxes"            --dry-run     (print the plan, move nothing)
   planner.py "노란 상자를 맨 아래로 해서 쌓아"  --scene default --dry-run   (no simulator: the start row of the boxes)
 
-The model gets the scene as text (boxes seen by the stereo rig, what rests on what, what the hand holds, where a box could go) and
+Requests no skill covers (waving, nodding, looking left or right) go to the `improvise` skill: a second model with joint-level tools
+(examples/agent/improvise.py). The model gets the scene as text (boxes seen by the stereo rig, what rests on what, what the hand holds, where a box could go) and
 answers with a short JSON plan over a handful of skills (stack, move, pick, place, place_on, home). It is called once per command, not
 in any control loop (the servo loop runs at 20 Hz in the executor and uses no model), and no image is sent. The plan is checked
 against the same reach and clearance rules the executor uses before anything moves; an invalid plan goes back to the model once with
@@ -26,7 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import scene_config as C  # noqa: E402
 
 DIRECTIONS = ("right", "left", "near", "far", "center")
-SKILLS = {"stack": {"order"}, "unstack": set(), "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set()}
+SKILLS = {"stack": {"order"}, "unstack": set(), "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set(),
+          "improvise": {"request"}}
 MODEL, ESCALATE = "claude-haiku-5-5", "claude-sonnet-5-5"
 
 SYSTEM = """You plan tasks for a humanoid robot (RB-Y1) that moves three 5 cm boxes on a table with its RIGHT arm. You do not control the motors: you
@@ -46,6 +48,9 @@ Skills (JSON objects in "steps", run in order). "Put the boxes back / take the s
   {"skill": "place", "x": 0.62, "y": -0.3}                   put the held box on the table at (x, y)
   {"skill": "place_on", "base": "green"}                     put the held box on top of the green box
   {"skill": "home"}                                          open the hand and return to the ready pose (hand must be empty)
+  {"skill": "improvise", "request": "손 흔들어"}               a body motion none of the skills above covers (waving, nodding, looking left or right,
+                                                             raising the arm): a second model designs it with joint-level tools. NOT for moving boxes;
+                                                             the hand must be empty. Pass the user's wish as "request", in the user's words.
 
 You are given the scene as JSON: "boxes" (position in metres, "on": the box it rests on), "unseen" (boxes the cameras cannot see), "holding"
 (the colour in the hand or null), "possible_moves" (for each box and direction the spot it would be put on, or null when there is no free
@@ -117,12 +122,15 @@ def validate(plan, scene):
             errors.append(f"{where}: {skill} takes {sorted(SKILLS[skill])}" + (f", got extra {sorted(extra)}" if extra else "")
                           + (f", missing {sorted(missing)}" if missing else ""))
             continue
-        needs_empty = skill in ("stack", "unstack", "move", "pick", "home")
+        needs_empty = skill in ("stack", "unstack", "move", "pick", "home", "improvise")
         if i == 1 and needs_empty and holding:
             errors.append(f"{where}: the hand holds the {holding} box: put it down first (place or place_on)")
         if i == 1 and skill in ("place", "place_on") and not holding:
             errors.append(f"{where}: {skill} needs a box in the hand and the hand is empty")
-        if skill == "unstack":
+        if skill == "improvise":
+            if not isinstance(step["request"], str) or not step["request"].strip():
+                errors.append(f"{where}: request must be the user's wish as text")
+        elif skill == "unstack":
             if not C.unstack_order(boxes):
                 errors.append(f"{where}: nothing is stacked")
         elif skill == "stack":
@@ -158,7 +166,7 @@ def validate(plan, scene):
 def ask_claude(system, user, model, timeout=120):
     """(answer text, cost in USD at list price, usage dict) from `claude -p`: no tools, no settings (hooks, plugins, memory), no session."""
     cmd = ["claude", "-p", "--model", model, "--tools", "", "--system-prompt", system, "--no-session-persistence",
-           "--disable-slash-commands", "--setting-sources", "", "--output-format", "json"]
+           "--disable-slash-commands", "--setting-sources", "", "--strict-mcp-config", "--output-format", "json"]
     try:   # run from /tmp: a CLAUDE.md in the project tree would be added to the prompt
         done = subprocess.run(cmd, input=user, capture_output=True, text=True, timeout=timeout, cwd=tempfile.gettempdir())
     except FileNotFoundError as exc:
@@ -201,6 +209,8 @@ def to_command(step, scene):
     skill = step["skill"]
     if skill == "stack":
         return {"cmd": "stack", "order": step["order"]}
+    if skill == "improvise":
+        return {"cmd": "improvise", "request": step["request"]}
     if skill == "unstack":
         return {"cmd": "unstack"}
     if skill == "pick":
@@ -228,7 +238,7 @@ def execute(plan, run_task, get_scene, say=print):
             cmd = to_command(step, get_scene())
         except PlanError as exc:
             return False, str(exc)
-        rc, text = run_task(cmd)
+        rc, text = run_task(cmd)       # "improvise" is not an executor command: the run_task of main() hands it to examples/agent/improvise.py
         if rc != 0:
             return False, f"step {i} ({step['skill']}) failed: {text}"
     return True, ""
@@ -287,6 +297,10 @@ def main(argv=None):
     if not args.dry_run and args.scene:
         ap.error("--scene is for --dry-run only: a recorded scene cannot be acted on")
     def run_task(cmd):
+        if cmd["cmd"] == "improvise":
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
+            import improvise
+            return improvise.run(cmd["request"], improvise.MODEL, offline=False, verbose=False), "improvise failed"
         r = rbyctl.ask(cmd, 600.0, log=(lambda text: None) if args.no_exec_log else None)   # prints the executor's log lines while it works
         if r is None:
             return 2, "the executor does not answer (is run_gui.sh running?)"

@@ -49,6 +49,21 @@ GUI에도 "tell the robot" 입력창이 있어(같은 플래너). GUI에서는 �
 
 컨테이너 이름이나 시뮬 이미지가 다르면 `examples/gui/run_gui.sh`와 `examples/vservo/run_demo.sh` 위쪽의 `ROS=`와 `IMAGE=` 값을 고치면 돼.
 
+## 목록에 없는 동작: 도구 쓰는 모델 (`examples/agent/`)
+
+"손 흔들어", "고개 끄덕여", "머리를 오른쪽으로 돌려"처럼 정해진 기술에 없는 요청은 플래너가 `improvise`로 넘기고, 두 번째 모델(Sonnet 5.5)이 도구를 써서 직접 설계해:
+
+```bash
+examples/agent/improvise.py "손 흔들어" --offline   # 로봇 없이: 설계와 안전 검사까지만 (정가 환산 약 $0.02~0.05, 30초 안팎)
+examples/agent/improvise.py "고개 끄덕여"           # 실제 로봇 (run_gui.sh가 켜져 있어야 해)
+```
+
+- 모델이 쓰는 도구는 `robot_tools.py`뿐이야(`claude -p --tools Bash --allowedTools "Bash(<그 파일>:*)"`): `state`(관절각, 손 위치), `limits`(움직일 수 있는 관절, 범위, 속도), `fk`(관절값을 바꾸면 손과 머리가 어디로 가나), `check`(안전 검사만), `move`(검사 후 실행), `save`/`play`/`skills`(잘 된 동작 저장).
+- 순서는 모델이 정해: 저장된 동작 확인 → 상태와 한계 → `fk`로 관절이 하는 일을 시험 → 궤적 작성 → `check`가 알려준 위반 고치기 → `move`.
+- **안전은 코드가 지켜**(`safety.py`): 오른팔, 머리, 몸통 요만 움직이고, URDF 한계에서 5.7° 여유, 관절 속도 한계, 궤적 길이, 경로를 3° 간격으로 훑어서 팔꿈치, 손목, 손이 테이블, 바닥, 몸 중심, 상자에서 떨어져 있는지. 실행기가 움직이기 전에 한 번 더 검사해(클라이언트를 믿지 않아). 시뮬 USD에 손목과 그리퍼 충돌 형상이 없어서 이 규칙은 일부러 넉넉하게 잡았어.
+- 이 모델 호출은 `--strict-mcp-config`가 꼭 필요해. 없으면 플러그인의 MCP 서버가 도구를 한 번 쓴 뒤부터 호출마다 컨텍스트에 약 27만 토큰을 끼워 넣었어(정가 환산 $1.29가 $0.047로 줄었어).
+- 시뮬에서 돌린 건 아직 없어. 오프라인에서만 확인했어: FK가 시뮬이 알려준 값(팔 내린 자세의 손끝 (0, -0.22, 0.592))과 1mm 안에서 맞고, 검사기와 도구는 시험이 있고, 모델은 손 흔들기, 끄덕이기, 머리 돌리기를 설계했고 "걸어가"는 거절했어.
+
 ## 어떻게 동작하나
 
 ```
@@ -69,6 +84,7 @@ GUI에도 "tell the robot" 입력창이 있어(같은 플래너). GUI에서는 �
 | 위치 | 내용 |
 |---|---|
 | `src/rby1_vision.py` | 카메라, landmark, 테이블, 물리 상자, 충돌 형상, ROS 2 발행, 실행 중 장면 명령 (`--vision` 옵션) |
+| `examples/agent/` | 목록 밖 동작: URDF 기구학(`kinematics.py`), 안전 검사(`safety.py`), 모델용 도구(`robot_tools.py`), 모델 호출(`improvise.py`) |
 | `examples/llm/` | 말 → 로봇 기술 플래너(`planner.py`): 장면을 텍스트로 모델에 주고, 계획을 검사해서 실행기에 보냄 |
 | `examples/gui/` | 관제 GUI, 실행기 서비스(`grasp_core.py`, `servo_server.py`), 명령줄 `rbyctl.py`, 한 줄 실행 `run_gui.sh`, 오프라인 시험 |
 | `examples/vservo/` | 인식(`vision.py`), 서보 제어(`servo.py`), 한 번 실행 `run_demo.sh`, 시험 |
@@ -99,6 +115,7 @@ GUI에도 "tell the robot" 입력창이 있어(같은 플래너). GUI에서는 �
 ```bash
 QT_QPA_PLATFORM=offscreen /usr/bin/python3 examples/gui/test_offline.py   # GUI, 지도, 실행기 명령 처리 (가짜 로봇)
 /usr/bin/python3 examples/vservo/test_servo.py                            # 서보 제어식 (핀홀 카메라 모의)
+/usr/bin/python3 examples/agent/test_agent.py                              # FK, 관절 궤적 안전 검사, 도구 (모델 없이)
 /usr/bin/python3 examples/llm/test_planner.py                              # 말 플래너 (가짜 모델, 가짜 로봇)
 /usr/bin/python3 examples/vservo/test_boxes.py                            # 색깔별 상자 3개 인식, 쌓인 상태 포함 (가짜 스테레오 영상)
 ```

@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, "/opt/rby1-sim-isaac/app")  # sim_gripper_bridge
-sys.path.insert(0, "/tmp")                      # vision.py, servo.py, scene_config.py, gripper_example.py (docker cp'd here)
+sys.path.insert(0, "/tmp")                      # vision.py, servo.py, scene_config.py, gripper_example.py, kinematics.py, safety.py (docker cp'd here)
 import scene_config as C  # noqa: E402
 
 TOOL = 0.12          # fingertips lie this far beyond the ee frame along the tool axis (-z_ee)
@@ -163,6 +163,13 @@ class GraspRobot:
         return {"phase": self.phase, "holding": self.holding, "held": self.held, "seeded": self.seeded,
                 "tip": self.tip().round(4).tolist(), "closeness": round(self.closeness(), 2)}
 
+    def state(self):
+        """Joint positions by name [rad] and the right hand's pose, for the agent tools (examples/agent/robot_tools.py)."""
+        names = list(self.rby.Model_A().robot_joint_names)
+        q = np.array(self.robot.get_state().position)
+        T = self.ee_pose()
+        return {"joints": {n: round(float(v), 5) for n, v in zip(names, q)}, "tip": self.tip_of(T).round(4).tolist(), "robot": self.status()}
+
     def scene(self):
         """What the robot sees: the boxes from the stereo rig (centre, yaw, what each rests on) and its own state."""
         boxes = self.perception.boxes()
@@ -221,12 +228,16 @@ class GraspRobot:
                     raise
                 self.stream = None   # a stream that sat idle (between two tasks) expires: open a new one and send again
 
-    def _joint_move(self, body_builder, name):
-        """Blocking joint-space move that can be aborted."""
+    def _joint_move(self, body_builder, name, head_builder=None):
+        """Blocking joint-space move that can be aborted. `head_builder` (a HeadCommandBuilder) moves the head along with the body."""
         rby = self.rby
         self._end_stream()
-        handler = self.robot.send_command(rby.RobotCommandBuilder().set_command(
-            rby.ComponentBasedCommandBuilder().set_body_command(body_builder)), 10)
+        components = rby.ComponentBasedCommandBuilder()
+        if body_builder is not None:
+            components.set_body_command(body_builder)
+        if head_builder is not None:
+            components.set_head_command(head_builder)
+        handler = self.robot.send_command(rby.RobotCommandBuilder().set_command(components), 10)
         while not handler.wait_for(100):
             if self.abort_flag.is_set():
                 handler.cancel()
@@ -476,6 +487,47 @@ class GraspRobot:
         self.event(f"{color} box on the table at ({x:.3f}, {y:.3f}), height {z:.3f}")
         if abs(z - (C.TABLE_TOP + C.BOX_SIZE[2] / 2)) > 0.02:
             raise TaskError(f"the {color} box is not standing on the table (height {z:.3f} m)")
+
+    def move_joints(self, traj):
+        """Play a joint trajectory designed by the agent (examples/agent: {"unit", "waypoints": [{"t", joint: value}]}): right arm, head, torso
+        yaw only. The safety check of examples/agent/safety.py runs here again, whatever the client did; waypoint by waypoint, each a blocking
+        joint-space move of the given duration (it stops at every waypoint) that can be aborted. Afterwards the hand is wherever the trajectory
+        left it, so the next pick starts with the seed pose again."""
+        import safety
+        def body():
+            rby = self.rby
+            cur = self.state()["joints"]
+            boxes = {c: b["t"] for c, b in self.perception.boxes().items()}
+            problems, summary = safety.check(cur, traj, boxes)
+            if problems:
+                raise TaskError("the trajectory is not safe: " + "; ".join(problems))
+            self.event(f"joints: {len(traj['waypoints'])} waypoints, {summary['duration_s']} s")
+            self._end_stream()
+            for i, (t, q, _, _) in enumerate(safety.expand(cur, traj), 1):
+                arm, torso, head = ([q.get(f"{g}_{k}", cur[f"{g}_{k}"]) for k in range(n)] for g, n in (("right_arm", 7), ("torso", 6), ("head", 2)))
+                changed = lambda names: any(abs(q.get(n, cur[n]) - cur[n]) > 1e-4 for n in names)   # noqa: E731
+                arm_c, torso_c, head_c = changed([f"right_arm_{k}" for k in range(7)]), changed(["torso_5"]), changed(["head_0", "head_1"])
+                self.event(f"joints: waypoint {i}/{len(traj['waypoints'])} ({t:.1f} s)")
+                if not (arm_c or torso_c or head_c):
+                    t0 = time.time()
+                    while time.time() - t0 < t:
+                        self._check()
+                        time.sleep(0.05)
+                    continue
+                body_b = rby.BodyComponentBasedCommandBuilder() if (arm_c or torso_c) else None
+                if arm_c:
+                    body_b.set_right_arm_command(rby.ArmCommandBuilder().set_command(
+                        rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(arm))))
+                if torso_c:
+                    body_b.set_torso_command(rby.TorsoCommandBuilder().set_command(
+                        rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(torso))))
+                head_b = rby.HeadCommandBuilder().set_command(
+                    rby.JointPositionCommandBuilder().set_minimum_time(t).set_position(np.array(head))) if head_c else None
+                self._joint_move(body_b, f"waypoint {i}", head_builder=head_b)
+                cur.update(q)
+            self.cmd_tip = self.tip()
+            self.seeded = False       # the arm is wherever the trajectory left it: the next pick seeds first
+        self._run("joints", body)
 
     def _align_over(self, base):
         """Hover loop over the `base` box: drive the held box's centre onto the base box's centre. Both are measured by the stereo rig

@@ -54,6 +54,10 @@ def test_validate():
     assert any("nothing is stacked" in e for e in P.validate({"steps": [{"skill": "unstack"}]}, ROW))
     assert any("holds the" in e for e in P.validate({"steps": [{"skill": "unstack"}]}, {**stacked, "robot": {"held": "blue", "holding": True}}))
     assert P.to_command({"skill": "unstack"}, stacked) == {"cmd": "unstack"}
+    assert P.validate({"steps": [{"skill": "improvise", "request": "손 흔들어"}]}, ROW) == []
+    assert any("request must be" in e for e in P.validate({"steps": [{"skill": "improvise", "request": " "}]}, ROW))
+    assert any("holds the" in e for e in P.validate({"steps": [{"skill": "improvise", "request": "wave"}]}, scene(held="blue")))
+    assert P.to_command({"skill": "improvise", "request": "wave"}, ROW) == {"cmd": "improvise", "request": "wave"}
     bad = {"steps": [{"skill": "fly"}, {"skill": "pick"}, {"skill": "pick", "color": "red"}, {"skill": "stack", "order": ["green"]},
                      {"skill": "move", "color": "blue", "to": "up"}, {"skill": "place", "x": 0.3, "y": 0.0}, {"skill": "home", "x": 1}]}
     errors = P.validate(bad, ROW)

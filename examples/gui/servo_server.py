@@ -15,6 +15,8 @@ Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yello
   {"cmd": "home"}                                  open the gripper and go back to the seed pose
   {"cmd": "gripper", "closeness": 0..1}
   {"cmd": "scene"}                                 reply only (see below): the boxes as the robot sees them, and its state
+  {"cmd": "state"}                                 reply only: joint positions by name [rad], the right fingertips, status
+  {"cmd": "joints", "trajectory": {"unit": "deg", "waypoints": [{"t": 2, "right_arm_1": -90}, ...]}}   a joint trajectory (examples/agent)
   {"cmd": "abort"}                                 stops the running task at once (also while it is moving)
 Status goes to 127.0.0.1:5121: {"type": "status", "state": "idle"|"busy", "task": .., "phase": .., "holding": .., "held": .., "seeded": ..,
 "tip": [x, y, z], "closeness": ..} twice a second and {"type": "log", "text": ..} for events and errors.
@@ -81,12 +83,12 @@ class Server:
             self.robot.abort()
             self.log("abort requested")
             self.reply({"type": "result", "ok": True, "text": "abort requested"}, to)
-        elif cmd == "scene":
+        elif cmd in ("scene", "state"):
             try:
-                self.reply({"type": "scene", **self.robot.scene()}, to)
+                self.reply({"type": cmd, **getattr(self.robot, cmd)()}, to)
             except Exception as exc:  # noqa: BLE001 - a failing query must not take the service down
                 self.reply({"type": "result", "ok": False, "text": f"scene: {exc}"}, to)
-        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "unstack", "home", "gripper"):
+        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "unstack", "joints", "home", "gripper"):
             if self.task and cmd != "gripper":
                 self.log(f"busy with '{self.task}': {cmd} ignored (abort first)")
                 self.reply({"type": "result", "ok": False, "text": f"busy with '{self.task}'"}, to)
@@ -147,6 +149,8 @@ class Server:
             r.stack(list(msg["order"]))
         elif cmd == "unstack":
             r.unstack()
+        elif cmd == "joints":
+            r.move_joints(msg["trajectory"])
         elif cmd == "home":
             r.home()
         elif cmd == "gripper":

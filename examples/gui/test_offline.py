@@ -415,6 +415,14 @@ class FakeRobot:
     def unstack(self):
         self.calls.append(("unstack",))
 
+    def state(self):
+        return {"joints": {"right_arm_1": -0.5}, "tip": [0.0, -0.22, 0.59], "robot": self.status()}
+
+    def move_joints(self, traj):
+        self.calls.append(("joints", traj["waypoints"][0]["t"]))
+        if traj.get("unit") == "bad":
+            raise grasp_core.TaskError("the trajectory is not safe: test")
+
     def stack(self, order):
         self.calls.append(("stack", tuple(order)))
         if "yellow" not in order:
@@ -655,6 +663,13 @@ def test_rbyctl():
         assert rc == 1 and "FAILED: failed: stack: cannot see the yellow box" in out, (rc, out)
         rc, out = run("unstack")
         assert rc == 0 and robot.calls[-1] == ("unstack",) and "done: unstack" in out, (rc, out)
+        # the agent tools talk to the same service: state is a reply-only query, joints a task whose refusal comes back with the reasons
+        r = rbyctl.ask({"cmd": "state"}, 5.0, quiet=True)
+        assert r["type"] == "state" and r["joints"] == {"right_arm_1": -0.5}
+        r = rbyctl.ask({"cmd": "joints", "trajectory": {"unit": "deg", "waypoints": [{"t": 2.0, "right_arm_1": -90}]}}, 5.0, quiet=True)
+        assert r["ok"] and robot.calls[-1] == ("joints", 2.0), r
+        r = rbyctl.ask({"cmd": "joints", "trajectory": {"unit": "bad", "waypoints": [{"t": 1.0}]}}, 5.0, quiet=True)
+        assert not r["ok"] and "not safe" in r["text"], r
         rc, out = run("pick", "yellow")
         assert rc == 0 and robot.calls[-1] == ("pick", "yellow", True, (0.0, 0.0, 0.0))
         rc, out = run("place-on", "green")
