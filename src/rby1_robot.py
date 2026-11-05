@@ -50,8 +50,11 @@ class RBY1Robot(SingleArticulation):
         position: Optional[Sequence[float]] = None,
         orientation: Optional[Sequence[float]] = None,
         robot_model: str = "m",
+        motor_group_overrides: Optional[dict[str, str]] = None,
     ) -> None:
         self.robot_model = str(robot_model).lower()
+        # Joint -> motor profile group overrides of the robot model (see RBY1ModelConfig).
+        self._motor_group_overrides = dict(motor_group_overrides or {})
         if self.robot_model not in WHEEL_COLLISION_PRIM_PATH_EXPRS:
             valid_models = ", ".join(sorted(WHEEL_COLLISION_PRIM_PATH_EXPRS))
             raise ValueError(
@@ -258,7 +261,7 @@ class RBY1Robot(SingleArticulation):
         joint.CreateBreakTorqueAttr().Set(float("inf"))
 
         joint_api = PhysxSchema.PhysxJointAPI(prim)
-        profile = get_profile_for_joint(prim.GetName())
+        profile = get_profile_for_joint(prim.GetName(), self._motor_group_overrides)
 
         if self._is_mecanum_roller_revolute_joint(prim):
             self._configure_mecanum_roller_joint(prim, joint_api)

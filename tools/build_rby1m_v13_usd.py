@@ -11,9 +11,14 @@ is the hand-tuned v1.2 asset with the six wrist links swapped:
   * *_arm_4 joint origin  z: -0.256 -> -0.3095
   * *_arm_5 joint limits  [-90, 110] deg -> [-50, 50] deg
   * *_arm_6 joint axis    Z -> X, limits +-155 deg -> +-90 deg
+  * *_arm_6 drive maxForce 44 -> 70 N*m: the v1.2 value is the measured saturation
+    of the v1.2 200:1 wrist-roll drive; the v1.3 WR module is a 100:1 drive that has
+    not been identified, so it takes the v1.2 wrist (arm_4) value like the rest of the
+    wrist servo model (rby1_task.RBY1_MODEL_CONFIGS["m_v1.3"].motor_group_overrides).
 
-Everything else (drive torque limits, max joint velocities, colliders,
-articulation settings, wheel models) is kept from v1.2.
+Everything else (max joint velocities, colliders, articulation settings, wheel
+models) is kept from v1.2. The converted DAE meshes are welded (the converter
+writes one point per face-vertex) so the asset stays a reasonable size.
 
 Run with the Isaac Sim python from a directory that does not contain an
 ``isaacsim`` folder (it shadows the pip package):
@@ -37,7 +42,7 @@ import numpy as np  # noqa: E402
 import omni.kit.asset_converter as asset_converter  # noqa: E402
 import omni.kit.commands  # noqa: E402
 import omni.usd  # noqa: E402
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt  # noqa: E402
 from scipy.spatial.transform import Rotation  # noqa: E402
 
 ASSETS = os.path.expanduser("~/rby1-sim-isaac/assets")
@@ -86,14 +91,14 @@ WRIST_MESHES = {
     "link_left_arm_6": "LINK_20_WR",
 }
 
-# joint name -> (localPos0 z, axis, lower deg, upper deg); None keeps the v1.2 value
+# joint name -> (localPos0 z, axis, lower deg, upper deg, drive maxForce); None keeps the v1.2 value
 WRIST_JOINTS = {
-    "right_arm_4": (-0.3095, None, None, None),
-    "left_arm_4": (-0.3095, None, None, None),
-    "right_arm_5": (None, None, -50.0, 50.0),
-    "left_arm_5": (None, None, -50.0, 50.0),
-    "right_arm_6": (None, "X", -90.0, 90.0),
-    "left_arm_6": (None, "X", -90.0, 90.0),
+    "right_arm_4": (-0.3095, None, None, None, None),
+    "left_arm_4": (-0.3095, None, None, None, None),
+    "right_arm_5": (None, None, -50.0, 50.0, None),
+    "left_arm_5": (None, None, -50.0, 50.0, None),
+    "right_arm_6": (None, "X", -90.0, 90.0, 70.0),
+    "left_arm_6": (None, "X", -90.0, 90.0, 70.0),
 }
 
 
@@ -154,9 +159,11 @@ def set_inertial(stage, link, mass, com, tensor):
     print(f"[inertial] {link}: mass={mass} com={com} diag={tuple(diag)} axes={quat}")
 
 
-def set_joint(stage, name, pos0_z, axis, lower, upper):
+def set_joint(stage, name, pos0_z, axis, lower, upper, max_force=None):
     prim = stage.GetPrimAtPath(f"{OLD_ROOT}/joints/{name}")
     joint = UsdPhysics.RevoluteJoint(prim)
+    if max_force is not None:
+        prim.GetAttribute("drive:angular:physics:maxForce").Set(float(max_force))
     if pos0_z is not None:
         pos0 = joint.GetLocalPos0Attr().Get()
         joint.GetLocalPos0Attr().Set(Gf.Vec3f(pos0[0], pos0[1], pos0_z))
@@ -419,6 +426,25 @@ def add_integrated_gripper(stage, side, tmp_dir):
     print(f"[gripper] {side}: ee rest pose {ee_pos}, EE_GR_TF bbox={mesh_bbox(stage, str(vis.GetPath()))}")
 
 
+def weld_converted_meshes(stage):
+    """Merge coincident points of the converted DAE meshes (one point per face-vertex)."""
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Mesh":
+            continue
+        mesh = UsdGeom.Mesh(prim)
+        points = np.asarray(mesh.GetPointsAttr().Get())
+        indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
+        if len(points) < 1000 or len(points) != len(indices):
+            continue  # already indexed (v1.2 prototypes) or trivial
+        # normals and primvars of the converted meshes are faceVarying/constant, so they stay valid
+        if mesh.GetNormalsAttr().HasAuthoredValue() and mesh.GetNormalsInterpolation() == "vertex":
+            raise SystemExit(f"{prim.GetPath()}: per-vertex normals would need remapping")
+        unique, inverse = np.unique(np.round(points, 6), axis=0, return_inverse=True)
+        mesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(unique.astype(np.float32)))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray.FromNumpy(inverse[indices].astype(np.int32)))
+        print(f"[weld] {prim.GetPath()}: {len(points)} -> {len(unique)} points")
+
+
 def remove_unreferenced_prototypes(stage, expected):
     """Delete the internal Flattened_Prototype_* roots nothing references.
 
@@ -493,6 +519,7 @@ def build():
         add_integrated_gripper(stage, side, tmp_dir)
 
     remove_unreferenced_prototypes(stage, old_visual_prototypes)
+    weld_converted_meshes(stage)
 
     omni.kit.commands.execute("MovePrim", path_from=OLD_ROOT, path_to=NEW_ROOT, keep_world_transform=False)
     stage.SetDefaultPrim(stage.GetPrimAtPath(NEW_ROOT))

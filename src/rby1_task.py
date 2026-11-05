@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -29,7 +29,7 @@ from config import (
     STATE_VELOCITY_AVG_WINDOW,
 )
 from gripper_servers import BaseGripperServer
-from motor_profiles import JOINT_MODEL_TO_MOTOR_MODEL_PROFILE, get_profile_for_joint, strip_side_prefix
+from motor_profiles import get_profile_for_joint, motor_group_for_joint, strip_side_prefix
 from rby1_controller import PDController
 from rby1_robot import RBY1Robot
 from rby1_udp_bridge import RBY1UdpBridge
@@ -56,6 +56,10 @@ class RBY1ModelConfig:
     # Sign of the finger-1 travel that opens the gripper: the v1.2 gripper opens
     # at -0.05 m, the v1.3 URDF finger joints open at +0.05 m.
     finger_open_sign: float = -1.0
+    # Side-stripped joint name -> motor profile group (motor_profiles.JOINT_MOTOR_MODEL_PROFILES key) for
+    # joints whose drive differs from the identified Model A v1.2 one. The group selects the PhysX motor
+    # model (friction, armature), the servo gains (_MOTOR_PD_GAINS) and the command delays (config).
+    motor_group_overrides: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.base_model:
@@ -88,28 +92,28 @@ if SERVO_PROFILE not in ("delayed", "no_delay"):
 _MOTOR_PD_GAINS["head"] = _MOTOR_PD_GAINS["arm_wrist"]
 
 
-def _joint_motor_group(joint_name: str) -> str:
-    name = strip_side_prefix(joint_name)
-    return JOINT_MODEL_TO_MOTOR_MODEL_PROFILE.get(name, name.split("_", 1)[0])
+def _joint_motor_group(joint_name: str, overrides: Optional[dict[str, str]] = None) -> str:
+    group = motor_group_for_joint(joint_name, overrides)
+    return group if group is not None else strip_side_prefix(joint_name).split("_", 1)[0]
 
 
-def _joint_pd_gains(joint_name: str) -> tuple[float, float]:
-    return _MOTOR_PD_GAINS[_joint_motor_group(joint_name)]
+def _joint_pd_gains(joint_name: str, overrides: Optional[dict[str, str]] = None) -> tuple[float, float]:
+    return _MOTOR_PD_GAINS[_joint_motor_group(joint_name, overrides)]
 
 
-def _joint_command_delay(joint_name: str) -> int:
+def _joint_command_delay(joint_name: str, overrides: Optional[dict[str, str]] = None) -> int:
     if SERVO_PROFILE == "no_delay":
         return 0
-    return int(COMMAND_DELAY_TICKS.get(_joint_motor_group(joint_name), 0))
+    return int(COMMAND_DELAY_TICKS.get(_joint_motor_group(joint_name, overrides), 0))
 
 
-def _joint_feedforward_delay(joint_name: str) -> int:
+def _joint_feedforward_delay(joint_name: str, overrides: Optional[dict[str, str]] = None) -> int:
     if SERVO_PROFILE == "no_delay":
         return 0
     if FEEDFORWARD_DELAY_MODE == "equal":
-        return _joint_command_delay(joint_name)
+        return _joint_command_delay(joint_name, overrides)
     table = MEASURED_DRIVER_DELAY_TICKS if FEEDFORWARD_DELAY_MODE == "measured" else FEEDFORWARD_DELAY_TICKS
-    return int(table.get(_joint_motor_group(joint_name), 0))
+    return int(table.get(_joint_motor_group(joint_name, overrides), 0))
 
 
 RBY1_MODEL_CONFIGS = {
@@ -140,6 +144,10 @@ RBY1_MODEL_CONFIGS = {
         base_model="m",
         integrated_gripper=True,
         finger_open_sign=1.0,
+        # The v1.3 wrist modules (WY/WP/WR) have not been identified on a robot. The WR roll is a 100:1 drive
+        # (v1.2: 200:1, whose identified ``arm_wrist2`` values therefore do not apply), so until a v1.3 robot is
+        # measured all three wrist joints use the v1.2 wrist (arm_4) motor model, servo gains and delays.
+        motor_group_overrides={"arm_6": "arm_wrist"},
     ),
 }
 
@@ -383,6 +391,7 @@ class RBY1Task(BaseTask):
             position=np.array([0.0, 0.0, 0.0]),
             orientation=np.array([1.0, 0.0, 0.0, 0.0]),
             robot_model=self.model_config.base_model,
+            motor_group_overrides=self.model_config.motor_group_overrides,
         )
         self.robot = scene.add(self.rby_robot)
         self.rby_robot.set_joint_properties(scene.stage)
@@ -931,7 +940,7 @@ class RBY1Task(BaseTask):
         self._friction_viscous = None
         if FRICTION_MODEL == "torque":
             body = [name for name in self.model_config.cpp_joint_names]
-            profiles = [get_profile_for_joint(name) for name in body]
+            profiles = [get_profile_for_joint(name, self.model_config.motor_group_overrides) for name in body]
             is_wheel = np.arange(len(body)) < self.model_config.mobility_dof
             self._friction_coulomb = np.where(is_wheel, 0.0, [pr["dynamic_effort"] for pr in profiles])
             self._friction_viscous = np.where(is_wheel, 0.0, [pr["viscous_nm_s_per_rad"] for pr in profiles])
@@ -942,13 +951,12 @@ class RBY1Task(BaseTask):
 
     def _initialize_pd_controller(self) -> None:
         """Create the PD controller using per-joint gains (C++ model DOF order)."""
-        joint_kp, joint_kd = np.asarray([
-            _joint_pd_gains(name) for name in self.model_config.cpp_joint_names
-        ], dtype=np.float32).T
-
+        overrides = self.model_config.motor_group_overrides
         names = self.model_config.cpp_joint_names
-        delay_ticks = np.asarray([_joint_command_delay(name) for name in names], dtype=int)
-        ff_delay_ticks = np.asarray([_joint_feedforward_delay(name) for name in names], dtype=int)
+        joint_kp, joint_kd = np.asarray([_joint_pd_gains(name, overrides) for name in names], dtype=np.float32).T
+
+        delay_ticks = np.asarray([_joint_command_delay(name, overrides) for name in names], dtype=int)
+        ff_delay_ticks = np.asarray([_joint_feedforward_delay(name, overrides) for name in names], dtype=int)
         self.pd_controller = PDController(
             kp=joint_kp,
             kd=joint_kd,

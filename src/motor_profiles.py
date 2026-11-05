@@ -101,8 +101,19 @@ def strip_side_prefix(joint_name: str) -> str:
     return joint_name
 
 
-def get_profile_for_joint(joint_name: str) -> dict[str, float]:
-    """Look up the motor profile for a fully qualified joint name."""
+def motor_group_for_joint(joint_name: str, overrides: dict[str, str] | None = None) -> str | None:
+    """Motor profile group of a fully qualified joint name, or None if the joint has no profile.
+
+    ``overrides`` maps a side-stripped joint name to another group for robot models whose drive differs from
+    the identified one (``RBY1ModelConfig.motor_group_overrides``).
+    """
     base = strip_side_prefix(joint_name)
-    profile_key = JOINT_MODEL_TO_MOTOR_MODEL_PROFILE.get(base, "default")
+    if overrides and base in overrides:
+        return overrides[base]
+    return JOINT_MODEL_TO_MOTOR_MODEL_PROFILE.get(base)
+
+
+def get_profile_for_joint(joint_name: str, overrides: dict[str, str] | None = None) -> dict[str, float]:
+    """Look up the motor profile for a fully qualified joint name."""
+    profile_key = motor_group_for_joint(joint_name, overrides) or "default"
     return JOINT_MOTOR_MODEL_PROFILES[profile_key]
