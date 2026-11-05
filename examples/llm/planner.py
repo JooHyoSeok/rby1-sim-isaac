@@ -17,6 +17,7 @@ claude-haiku-5-5, escalating to claude-sonnet-5-5 when the first plan is invalid
 """
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -51,8 +52,8 @@ Skills (JSON objects in "steps", run in order). "Put the boxes back / take the s
   {"skill": "home"}                                          open the hand and return to the ready pose (hand must be empty)
   {"skill": "drive", "forward_m": -0.2, "turn_deg": 30}      roll the base on its wheels: first turn_deg degrees (positive = left, negative = right, at
                                                              most 90), then forward_m metres (negative = back, at most 0.3); or {"skill": "drive", "home": true}
-                                                             to roll back where it started. Refused when the arm or base would hit the table. Until the base is
-                                                             back, pick / stack / home do not work.
+                                                             to roll back where it started. Refused when the arm or base would hit the table. The simulated base turns
+                                                             poorly (a turn swings it 20-60 cm): prefer a straight move; picking works from wherever it stands.
   {"skill": "improvise", "request": "손 흔들어"}               a body motion none of the skills above covers (waving, nodding, looking left or right,
                                                              raising the arm): a second model designs it with joint-level tools. NOT for moving boxes;
                                                              the hand must be empty. Pass the user's wish as "request", in the user's words.
@@ -71,9 +72,15 @@ class PlanError(Exception):
     pass
 
 
-def resolve_spot(color, to, boxes):
+def base_of(scene):
+    """(x, y, yaw rad) of the base in the world from a scene reply, or None while it stands at its start pose."""
+    b = scene.get("robot", {}).get("base")
+    return None if not b or (b[0] == b[1] == b[2] == 0.0) else (b[0], b[1], math.radians(b[2]))
+
+
+def resolve_spot(color, to, boxes, base=None):
     """Where the `color` box would be put for direction `to`, or None: no free reachable spot that way, or it already stands there."""
-    spot = C.direction_spot(to, boxes, exclude=color)
+    spot = C.direction_spot(to, boxes, exclude=color, base=base)
     if spot is None or ((spot[0] - boxes[color][0]) ** 2 + (spot[1] - boxes[color][1]) ** 2) ** 0.5 <= 0.03:
         return None
     return list(spot)
@@ -88,7 +95,7 @@ def build_context(scene):
     for c in boxes:
         moves = {}
         for d in DIRECTIONS:
-            moves[d] = resolve_spot(c, d, boxes)
+            moves[d] = resolve_spot(c, d, boxes, base_of(scene))
         ctx["possible_moves"][c] = moves
     ctx["suggested_stack_order"] = sorted(boxes, key=lambda c: (abs(boxes[c][1] - C.SHOULDER[1]), c))
     return ctx
@@ -158,17 +165,17 @@ def validate(plan, scene):
             elif skill == "move":
                 to = step["to"]
                 if isinstance(to, str) and to in DIRECTIONS:
-                    if resolve_spot(c, to, boxes) is None:
+                    if resolve_spot(c, to, boxes, base_of(scene)) is None:
                         errors.append(f"{where}: there is no free reachable spot to the {to} for the {c} box (or it is already there)")
                 elif isinstance(to, list) and len(to) == 2 and all(isinstance(v, (int, float)) for v in to):
-                    if (p := C.check_pose(to[0], to[1], C.TABLE_TOP)):
+                    if (p := C.check_pose(to[0], to[1], C.TABLE_TOP, base=base_of(scene))):
                         errors.append(f"{where}: ({to[0]}, {to[1]}) is not possible: {p}")
                 else:
                     errors.append(f"{where}: 'to' must be one of {list(DIRECTIONS)} or [x, y]")
         elif skill == "place":
             if not all(isinstance(step[k], (int, float)) for k in ("x", "y")):
                 errors.append(f"{where}: x and y must be numbers")
-            elif (p := C.check_pose(step["x"], step["y"], C.TABLE_TOP)):
+            elif (p := C.check_pose(step["x"], step["y"], C.TABLE_TOP, base=base_of(scene))):
                 errors.append(f"{where}: ({step['x']}, {step['y']}) is not possible: {p}")
         elif skill == "place_on" and step["base"] not in boxes:
             errors.append(f"{where}: the {step['base']} box is not visible")
@@ -238,7 +245,7 @@ def to_command(step, scene):
         return {"cmd": "home"}
     boxes = {c: tuple(b["pos"]) for c, b in scene["boxes"].items()}
     to = step["to"]
-    spot = resolve_spot(step["color"], to, boxes) if isinstance(to, str) else tuple(to)
+    spot = resolve_spot(step["color"], to, boxes, base_of(scene)) if isinstance(to, str) else tuple(to)
     if spot is None:
         raise PlanError(f"no free reachable spot to the {to} for the {step['color']} box (or it is already there)")
     return {"cmd": "pick_place", "color": step["color"], "x": spot[0], "y": spot[1], "top": C.TABLE_TOP}

@@ -78,7 +78,7 @@ def test_validate():
     s = scene()
     del s["boxes"]["yellow"]
     real = P.resolve_spot
-    P.resolve_spot = lambda color, to, boxes: [0.55, -0.30]                  # a table pulled closer would have room: pretend
+    P.resolve_spot = lambda color, to, boxes, base=None: [0.55, -0.30]                  # a table pulled closer would have room: pretend
     try:
         assert P.validate({"steps": [{"skill": "move", "color": "blue", "to": "left"}]}, s) == []
     finally:
@@ -91,7 +91,7 @@ def test_commands():
     del s["boxes"]["yellow"]
     assert P.to_command({"skill": "stack", "order": ["a", "b"]}, s) == {"cmd": "stack", "order": ["a", "b"]}
     real = P.resolve_spot
-    P.resolve_spot = lambda color, to, boxes: [0.55, -0.30]
+    P.resolve_spot = lambda color, to, boxes, base=None: [0.55, -0.30]
     try:
         cmd = P.to_command({"skill": "move", "color": "blue", "to": "left"}, s)
     finally:

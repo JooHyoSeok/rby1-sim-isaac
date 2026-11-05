@@ -8,6 +8,7 @@ import math
 PORT_SCENE = 5110        # control centre -> simulator: move the box / table (src/rby1_vision.py poll_commands)
 PORT_EXEC_CMD = 5120     # control centre -> executor service: pick, place, ...
 PORT_EXEC_STATUS = 5121  # executor service -> control centre: status and log lines
+PORT_BASE_POSE = 5130    # simulator -> executor service: the base's true pose {"base": [x, y, yaw], "t": ..} at 20 Hz (the wheels slip when it turns)
 
 # Scene defaults (src/rby1_vision.py)
 TABLE_CENTER = (0.88, 0.0)
@@ -47,13 +48,28 @@ def box_reachable(x, y, top) -> bool:
     return tip_reachable(box_tip(x, y, top))
 
 
-def on_table(x, y, table_center=TABLE_CENTER, table_size=TABLE_SIZE, margin=0.04) -> bool:
+def base_to_world(base, x, y):
+    """World position of the point (x, y) given in the base frame; `base` = (x, y, yaw [rad]) of the base in the world (the simulator's true pose)."""
+    c, s = math.cos(base[2]), math.sin(base[2])
+    return base[0] + c * x - s * y, base[1] + s * x + c * y
+
+
+def world_to_base(base, x, y):
+    c, s = math.cos(base[2]), math.sin(base[2])
+    dx, dy = x - base[0], y - base[1]
+    return c * dx + s * dy, -s * dx + c * dy
+
+
+def on_table(x, y, table_center=TABLE_CENTER, table_size=TABLE_SIZE, margin=0.04, base=None) -> bool:
+    """Is the point (x, y) on the table? In the world, or in the base frame when `base` (the base's world pose) is given: the table stays where it is."""
+    if base is not None:
+        x, y = base_to_world(base, x, y)
     return (abs(x - table_center[0]) <= table_size[0] / 2 - margin) and (abs(y - table_center[1]) <= table_size[1] / 2 - margin)
 
 
-def check_pose(x, y, top, table_center=TABLE_CENTER, table_size=TABLE_SIZE):
-    """None when a box can stand at (x, y) and be reached there, else the reason."""
-    if not on_table(x, y, table_center, table_size):
+def check_pose(x, y, top, table_center=TABLE_CENTER, table_size=TABLE_SIZE, base=None):
+    """None when a box can stand at (x, y) and be reached there, else the reason. With `base` (the base's world pose) the point is in the base frame."""
+    if not on_table(x, y, table_center, table_size, base=base):
         return "not on the table"
     d = wrist_distance(box_tip(x, y, top))
     if d > MAX_REACH:
@@ -70,6 +86,20 @@ SEED_EDGE_X = 0.57
 
 def table_front_edge(table_center=TABLE_CENTER, table_size=TABLE_SIZE):
     return table_center[0] - table_size[0] / 2
+
+
+def table_front_distance(base, table_center=TABLE_CENTER, table_size=TABLE_SIZE, y_range=(-0.45, 0.0)):
+    """How far ahead of the base (along its x axis) the nearest table point is among those with base-frame y in `y_range` (the right arm's side, where
+    the seed motion swings the arm and the elbow); infinity when none is. The seed motion needs SEED_EDGE_X of free room."""
+    best = math.inf
+    nx, ny = int(table_size[0] / 0.02) + 1, int(table_size[1] / 0.02) + 1
+    for i in range(nx):
+        for j in range(ny):
+            wx, wy = table_center[0] - table_size[0] / 2 + i * 0.02, table_center[1] - table_size[1] / 2 + j * 0.02
+            bx, by = world_to_base(base, wx, wy)
+            if bx > 0 and y_range[0] <= by <= y_range[1]:
+                best = min(best, bx)
+    return best
 
 
 def table_ok_before_seed(table_center=TABLE_CENTER, table_size=TABLE_SIZE) -> bool:
@@ -134,15 +164,18 @@ def stack_problems(order, boxes, top=TABLE_TOP):
     return problems
 
 
-def direction_spot(direction, boxes, exclude=None, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE):
+def direction_spot(direction, boxes, exclude=None, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE, base=None):
     """Free table spot that is furthest 'right' (-y, the right arm's side), 'left' (+y), 'near' (-x) or 'far' (+x), or the one
     closest to the shoulder line ('center'): reachable with a margin, on the table, FINGER_CLEARANCE from every box but `exclude`."""
     others = [(x, y) for n, (x, y, _) in boxes.items() if n != exclude]
     best = None
-    for i in range(int(table_size[0] / 0.01) + 1):
-        for j in range(int(table_size[1] / 0.01) + 1):
-            x, y = table_center[0] - table_size[0] / 2 + i * 0.01, table_center[1] - table_size[1] / 2 + j * 0.01
-            if check_pose(x, y, top, table_center, table_size) is not None or wrist_distance(box_tip(x, y, top)) > MAX_REACH - SPOT_MARGIN:
+    # the grid: the table's extent when the base stands at the world origin, else the base-frame region the arm can reach (the table is rotated in it)
+    x0, y0, nx, ny = (table_center[0] - table_size[0] / 2, table_center[1] - table_size[1] / 2, int(table_size[0] / 0.01) + 1, int(table_size[1] / 0.01) + 1) \
+        if base is None else (0.15, -0.60, 71, 121)
+    for i in range(nx):
+        for j in range(ny):
+            x, y = x0 + i * 0.01, y0 + j * 0.01
+            if check_pose(x, y, top, table_center, table_size, base) is not None or wrist_distance(box_tip(x, y, top)) > MAX_REACH - SPOT_MARGIN:
                 continue
             if any(math.hypot(x - ox, y - oy) < FINGER_CLEARANCE for ox, oy in others):
                 continue
@@ -158,16 +191,18 @@ def unstack_order(boxes):
     return sorted((n for n in boxes if on[n]), key=lambda n: -boxes[n][2])
 
 
-def table_spot(name, boxes, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE):
+def table_spot(name, boxes, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE, base=None):
     """A free table spot for the `name` box: its own start spot if nothing is closer than FINGER_CLEARANCE, else another start spot (boxes were
     picked there, so the arm reaches them), else the best free spot the reach model allows; None when there is none."""
     others = [(x, y) for n, (x, y, _) in boxes.items() if n != name]
-    starts = [BOX_DEFAULTS[name]] + [xy for n, xy in BOX_DEFAULTS.items() if n != name]
+    starts = [BOX_DEFAULTS[name]] + [xy for n, xy in BOX_DEFAULTS.items() if n != name]     # world coordinates ...
+    if base is not None:
+        starts = [world_to_base(base, *xy) for xy in starts]                                  # ... as the boxes and the answer are in the base frame
     for x, y in starts:
-        if check_pose(x, y, top, table_center, table_size) is None and all(math.hypot(x - ox, y - oy) >= FINGER_CLEARANCE for ox, oy in others):
+        if check_pose(x, y, top, table_center, table_size, base) is None and all(math.hypot(x - ox, y - oy) >= FINGER_CLEARANCE for ox, oy in others):
             return (x, y)
     for direction in ("center", "right", "left", "near", "far"):
-        spot = direction_spot(direction, boxes, exclude=name, top=top, table_center=table_center, table_size=table_size)
+        spot = direction_spot(direction, boxes, exclude=name, top=top, table_center=table_center, table_size=table_size, base=base)
         if spot is not None:
             return spot
     return None

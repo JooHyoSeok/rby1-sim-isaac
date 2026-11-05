@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
@@ -365,6 +366,32 @@ def _place_table(stage, x: float, y: float, top: float) -> None:
     global _table_top
     _table_top = top
     UsdGeom.XformCommonAPI(stage.GetPrimAtPath("/World/Table")).SetTranslate(Gf.Vec3d(x, y, top - TABLE_SIZE[2] / 2))
+
+
+BASE_POSE_PORT = 5130
+_base_tx, _base_last = None, 0.0
+
+
+def publish_base_pose(robot) -> None:
+    """The base's true pose to the executor (examples/gui/grasp_core.py base_pose), at 20 Hz: the wheels slip when the base turns, so the
+    executor's odometry drifts (measured: 30 degrees commanded, 15 turned). In a real robot this is the job of SLAM / localization."""
+    global _base_tx, _base_last
+    now = time.time()
+    if now - _base_last < 0.05:
+        return
+    _base_last = now
+    try:
+        if _base_tx is None:
+            _base_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        base = getattr(robot, "base", None) or robot
+        pos, quat = base.get_world_pose()
+        w, x, y, z = (float(v) for v in quat)
+        yaw = float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+        _base_tx.sendto(json.dumps({"base": [float(pos[0]), float(pos[1]), yaw], "t": now}).encode(), ("127.0.0.1", BASE_POSE_PORT))
+    except Exception as exc:  # noqa: BLE001 - a missing pose must never stop the simulation
+        if _base_last > 0:
+            print(f"[Vision] base pose not published: {exc}", flush=True)
+        _base_last = float("inf")
 
 
 def poll_commands(stage) -> None:

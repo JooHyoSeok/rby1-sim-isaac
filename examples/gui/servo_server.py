@@ -14,7 +14,8 @@ Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yello
   {"cmd": "unstack"}                               take a stack apart: top box first onto free table spots (its start spot if free)
   {"cmd": "drive", "forward": 0.2, "turn_deg": -30}   roll the base: first turn (positive = left), then forward (negative = back); at most 30 cm and
                                                    90 degrees per command, refused when it would hit the table. {"cmd": "drive", "home": true}: back to
-                                                   the start pose (the manipulation skills refuse while the base is away from it)
+                                                   the start pose (best effort: the simulated base turns poorly). Picking, stacking and the joint
+                                                   tools work wherever the base stands: the boxes are converted to the base frame with its true pose.
   {"cmd": "home"}                                  open the gripper and go back to the seed pose
   {"cmd": "gripper", "closeness": 0..1}
   {"cmd": "scene"}                                 reply only (see below): the boxes as the robot sees them, and its state
@@ -91,7 +92,7 @@ class Server:
                 self.reply({"type": cmd, **getattr(self.robot, cmd)()}, to)
             except Exception as exc:  # noqa: BLE001 - a failing query must not take the service down
                 self.reply({"type": "result", "ok": False, "text": f"scene: {exc}"}, to)
-        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "unstack", "joints", "drive", "home", "gripper"):
+        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "unstack", "joints", "drive", "drive_raw", "home", "gripper"):
             if self.task and cmd != "gripper":
                 self.log(f"busy with '{self.task}': {cmd} ignored (abort first)")
                 self.reply({"type": "result", "ok": False, "text": f"busy with '{self.task}'"}, to)
@@ -154,6 +155,8 @@ class Server:
             r.unstack()
         elif cmd == "joints":
             r.move_joints(msg["trajectory"])
+        elif cmd == "drive_raw":
+            r.drive_raw(msg["v"], msg["w"], msg["seconds"], msg.get("mode", "se2"))
         elif cmd == "drive":
             r.drive(forward=msg.get("forward", 0.0), turn_deg=msg.get("turn_deg", 0.0), home=msg.get("home", False))
         elif cmd == "home":

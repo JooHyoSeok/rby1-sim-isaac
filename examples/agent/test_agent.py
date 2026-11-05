@@ -99,6 +99,10 @@ def test_rules():
     # each hand stays on its own side of the body's middle
     assert rules("right_wrist", (0.1, 0.2, 1.0)) == {"chest"} and rules("right_wrist", (0.1, -0.3, 1.0)) == set()
     assert rules("left_wrist", (0.1, -0.2, 1.0)) == {"chest"} and rules("left_wrist", (0.1, 0.3, 1.0)) == set()
+    # the table is where it is in the world: with the base backed up 0.3 m the same hand point is no longer over it
+    assert rules("right_hand_tip", (0.70, 0.0, 0.78)) == {"table"}
+    assert {r for r, _ in S._clearance("right_hand_tip", (0.70, 0.0, 0.78), None, base=(-0.3, 0.0, 0.0))} == set()           # world x = 0.40: in front of the edge
+    assert {r for r, _ in S._clearance("right_hand_tip", (0.30, 0.0, 0.78), None, base=(0.3, 0.0, 0.0))} == {"table"}         # base moved up: the hand is over it
     seeded = dict(zip(K.TORSO, [0, 1, -2, 1, 0, 0.0])) | dict(zip(K.RIGHT_ARM, [0, 0, 0, -1.8, 0, 0.3, -1.57]))
     across = {"right_arm_0": 124, "right_arm_1": -29, "right_arm_2": 131, "right_arm_3": -79, "right_arm_4": -79, "right_arm_5": -83, "right_arm_6": 44}
     v, _ = S.check(HANG, {"waypoints": [{"t": 8.0, **across}]})

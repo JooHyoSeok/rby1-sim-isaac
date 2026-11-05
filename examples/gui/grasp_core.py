@@ -79,15 +79,32 @@ class Perception:
 
     def __init__(self, port=5102):
         self.n, self.t, self.data = 0, 0.0, None
+        self.base_pose = lambda: (0.0, 0.0, 0.0)   # set by GraspRobot: where the base stands in the world; the boxes are handed on in the BASE frame
         self._rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._rx.bind(("127.0.0.1", port))
         threading.Thread(target=self._listen, daemon=True).start()
 
     def _listen(self):
         while True:
-            self.data = json.loads(self._rx.recv(65536))
+            data = json.loads(self._rx.recv(65536))
+            try:
+                self._to_base(data)
+            except Exception as exc:  # noqa: BLE001 - one bad message (or the robot not ready yet) must not stop the listener
+                print(f"perception: could not convert to the base frame: {exc}", flush=True)
+            self.data = data
             self.t = time.time()
             self.n += 1
+
+    def _to_base(self, data):
+        """The stereo rig sees the boxes in the world; everything downstream (servo, reach model, joint safety) works in the robot's base frame."""
+        x, y, yaw = (float(v) for v in self.base_pose())
+        if x == y == yaw == 0.0 or not data.get("boxes"):
+            return
+        c, s = np.cos(yaw), np.sin(yaw)
+        Rt = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])         # world -> base rotation (the transpose of Rz(yaw))
+        for b in data["boxes"].values():
+            b["t"] = (Rt @ (np.array(b["t"]) - [x, y, 0.0])).tolist()
+            b["R"] = (Rt @ np.array(b["R"])).tolist()
 
     def boxes(self, max_age=1.5):
         """{colour: {"R", "t", "n", "rms"}} of the boxes in the latest message (empty when it is older than max_age seconds)."""
@@ -135,9 +152,14 @@ class GraspRobot:
         self.fk = self.dyn.make_state(["base", "ee_right"], rby.Model_A().robot_joint_names)
         self.left_hold = dict(zip([f"left_arm_{i}" for i in range(7)], np.array(self.robot.get_state().position)[15:22]))
         self.dbg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.stream, self._base_stream = None, None
+        self.stream, self._base_stream, self.base_mode = None, None, "se2"
         self.odo, self._odo_lock = B.Odometry(*self._wheels()), threading.Lock()   # the base starts at the world origin, facing +x
         self.footprint = self._read_footprint()
+        self.perception.base_pose = self.base_pose      # from here on the perception hands the boxes on in the base frame
+        self.gt_base = None    # (pose, wall time) of the simulator's true base pose, preferred while it keeps arriving
+        self._base_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._base_rx.bind(("127.0.0.1", C.PORT_BASE_POSE))
+        threading.Thread(target=self._listen_base, daemon=True).start()
         self._fk_lock = threading.Lock()  # the status heartbeat and the running task both compute forward kinematics
         self.cmd_tip = self.tip()
 
@@ -175,7 +197,8 @@ class GraspRobot:
         return {"joints": {n: round(float(v), 5) for n, v in zip(names, q)}, "tip": self.tip_of(T).round(4).tolist(), "robot": self.status()}
 
     def scene(self):
-        """What the robot sees: the boxes from the stereo rig (centre, yaw, what each rests on) and its own state."""
+        """What the robot sees: the boxes from the stereo rig in the BASE frame (centre, yaw, what each rests on) and its own state (robot.base = where
+        the base stands in the world: x, y, yaw in degrees). While the base is at its start pose the two frames are the same."""
         boxes = self.perception.boxes()
         on = C.stacked_on({c: b["t"] for c, b in boxes.items()})
         out = {}
@@ -312,7 +335,7 @@ class GraspRobot:
     def seed(self):
         """Torso squat and bent right arm: the start of every grasp (the straight arm is a Cartesian singularity)."""
         def body():
-            self._require_base_home()
+            self._require_table_clear_for_seed()
             rby = self.rby
             self.event("seed pose: torso squat")
             self._joint_move(rby.BodyComponentBasedCommandBuilder().set_torso_command(
@@ -341,7 +364,6 @@ class GraspRobot:
     def pick(self, color="blue", use_image=True, bias=(0.0, 0.0, 0.0)):
         """Visual-servo to the `color` box, close the gripper, lift. Starts from the current hand pose (seeds first if needed)."""
         def body():
-            self._require_base_home()
             if self.holding:
                 raise TaskError(f"already holding the {self.held} box")
             if color not in C.BOX_NAMES:
@@ -388,7 +410,6 @@ class GraspRobot:
     def _place_at(self, x, y, top, base=None):
         """Carry the held box over (x, y) (rise first, so it clears boxes on the way), lower it onto a surface of height `top`, let go,
         back off. With `base` (colour of the box below) the hand first aligns the held box over it with the stereo rig (_align_over)."""
-        self._require_base_home()
         if not self.holding:
             raise TaskError("nothing in the hand: pick first")
         what = f"on the {base} box" if base else f"at ({x:.3f}, {y:.3f})"
@@ -472,7 +493,7 @@ class GraspRobot:
                 if not order:
                     break
                 c = order[0]
-                spot = C.table_spot(c, boxes)
+                spot = C.table_spot(c, boxes, base=tuple(float(v) for v in self.base_pose()))   # boxes and the spot are in the base frame, the table is not
                 if spot is None:
                     raise TaskError(f"no free table spot for the {c} box")
                 self.event(f"unstack: the {c} box goes to ({spot[0]:.2f}, {spot[1]:.2f})")
@@ -502,11 +523,10 @@ class GraspRobot:
         left it, so the next pick starts with the seed pose again."""
         import safety
         def body():
-            self._require_base_home()
             rby = self.rby
             cur = self.state()["joints"]
             boxes = {c: b["t"] for c, b in self.perception.boxes().items()}
-            problems, summary = safety.check(cur, traj, boxes)
+            problems, summary = safety.check(cur, traj, boxes, base=self.base_pose())
             if problems:
                 raise TaskError("the trajectory is not safe: " + "; ".join(problems))
             self.event(f"joints: {len(traj['waypoints'])} waypoints, {summary['duration_s']} s")
@@ -548,17 +568,32 @@ class GraspRobot:
         pos = self.robot.get_state().position      # Model_A.mobility_idx = [0, 1]: right_wheel, left_wheel
         return float(pos[0]), float(pos[1])
 
-    def base_pose(self):
-        """(x, y, yaw) of the base relative to where the executor started, from the wheel joints. Called by the status heartbeat too, so
-        it never has more than a fraction of a second of wheel travel to integrate."""
-        with self._odo_lock:
-            return self.odo.update(*self._wheels()).copy()
+    def _listen_base(self):
+        while True:
+            try:
+                msg = json.loads(self._base_rx.recv(4096))
+                self.gt_base = (np.array(msg["base"], float), time.time())
+            except (ValueError, KeyError):
+                continue
 
-    def _require_base_home(self):
-        """Perception, servo, reach model and safety checks all assume the base stands where it started."""
-        x, y, yaw = self.base_pose()
-        if not self.odo.at_home():
-            raise TaskError(f"the base is {np.hypot(x, y) * 100:.0f} cm and {np.degrees(yaw):.0f} degrees from its start pose: drive back first (drive home)")
+    def base_pose(self):
+        """(x, y, yaw) of the base relative to where the executor started. The simulator's true pose when it keeps sending it (the wheels slip
+        when the base turns: odometry reported 30 degrees where 15 happened); else the wheel odometry. Called by the status heartbeat too, so
+        the odometry never has more than a fraction of a second of wheel travel to integrate."""
+        with self._odo_lock:
+            odo = self.odo.update(*self._wheels()).copy()
+            if self.gt_base is not None and time.time() - self.gt_base[1] < 0.5:
+                self.odo.pose = self.gt_base[0].copy()      # and the fallback carries on from here
+                return self.gt_base[0].copy()
+            return odo
+
+    def _require_table_clear_for_seed(self):
+        """The squat of the seed pose needs room in front of the base (C.SEED_EDGE_X): the table is where it is in the world, the base may stand anywhere."""
+        if self.seeded:
+            return
+        ahead = C.table_front_distance(self.base_pose())
+        if ahead < C.SEED_EDGE_X:
+            raise TaskError(f"the table is only {ahead * 100:.0f} cm ahead of the base: the seed pose needs {C.SEED_EDGE_X * 100:.0f} cm (drive back first)")
 
     def _read_footprint(self):
         """Base and wheel outline from the simulator's ground truth file (src/rby1_vision.py write_gt), else the generous default."""
@@ -570,9 +605,13 @@ class GraspRobot:
     def _send_base(self, v, w):
         """One SE(2) velocity command (forward speed v [m/s], turn rate w [rad/s]), valid for 0.3 s: if this program dies the base stops by itself."""
         rby = self.rby
-        rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_mobility_command(rby.MobilityCommandBuilder().set_command(
-            rby.SE2VelocityCommandBuilder().set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(0.3)).set_minimum_time(0.2)
-            .set_velocity(np.array([v, 0.0]), w))))
+        header = rby.CommandHeaderBuilder().set_control_hold_time(0.3)
+        if self.base_mode == "wheels":    # the wheel joints directly: (v, w) -> the two wheel speeds (rad/s) with the geometry of base_motion.py
+            wheels = np.array([v + w * B.TRACK / 2, v - w * B.TRACK / 2]) / (B.WHEEL_R * B.FORWARD_SIGN)
+            command = rby.JointVelocityCommandBuilder().set_command_header(header).set_minimum_time(0.2).set_velocity(wheels)
+        else:                             # the SDK's planar velocity command
+            command = rby.SE2VelocityCommandBuilder().set_command_header(header).set_minimum_time(0.2).set_velocity(np.array([v, 0.0]), w)
+        rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_mobility_command(rby.MobilityCommandBuilder().set_command(command)))
         for attempt in (0, 1):
             if self._base_stream is None:
                 self._base_stream = self.robot.create_command_stream(10)
@@ -599,6 +638,7 @@ class GraspRobot:
         start = self.base_pose()
         v_max, acc, v_min, tol = (B.W_MAX, B.A_ANG, B.W_MIN, B.TOL_ANG) if kind == "turn" else (B.V_MAX, B.A_LIN, B.V_MIN, B.TOL_LIN)
         limit, t0, sign = 5.0 + 3.0 * abs(target) / v_max, time.time(), 1.0 if target >= 0 else -1.0
+        boost, last_progress, last_done = 1.0, time.time(), 0.0
         try:
             while True:
                 t_loop = time.time()
@@ -608,14 +648,49 @@ class GraspRobot:
                 remaining = target - done
                 if remaining * sign <= tol:
                     return
+                if done * sign < -(0.03 if kind == "forward" else 0.05):   # moving the wrong way: the wheel sign is off (or the base is blocked); do not run away
+                    raise TaskError(f"the base moves the wrong way ({done:+.3f} while driving {target:+.3f}): wheel direction wrong? stopped")
                 if time.time() - t0 > limit:
                     raise TaskError(f"the base did not finish the {kind} within {limit:.0f} s (done {done:.3f} of {target:.3f})")
-                s = sign * B.speed(remaining, v_max, acc, v_min)
+                if abs(done - last_done) > (0.002 if kind == "forward" else 0.004):   # moving: fine; stuck for a second: push harder (stiction)
+                    last_progress, last_done, boost = time.time(), done, 1.0
+                elif time.time() - last_progress > B.STALL_TIME:
+                    boost, last_progress = min(boost * B.STALL_BOOST, 3.0), time.time()
+                s = sign * min(boost * B.speed(remaining, v_max, acc, v_min), 1.5 * v_max)
                 self._send_base(0.0 if kind == "turn" else s, s if kind == "turn" else 0.0)
                 self._tick(t_loop)
         finally:
             self._stop_base()
             time.sleep(0.3)
+
+    def drive_raw(self, v, w, seconds, mode="se2"):
+        """Command a constant (v, w) for `seconds` and log the base pose every half second: for finding out how the base really moves (hard limits:
+        |v| <= 0.15 m/s, |w| <= 0.5 rad/s, 6 s; the table check of drive does not apply, so only use it with the arms hanging and the table far away)."""
+        def body():
+            import kinematics
+            if abs(v) > 0.15 or abs(w) > 0.5 or not 0 < seconds <= 6.0:
+                raise TaskError("drive_raw: |v| <= 0.15 m/s, |w| <= 0.5 rad/s, 0 < seconds <= 6")
+            if B.hits_table(self.base_pose(), list(kinematics.all_points(self.state()["joints"]).values()), self.footprint):
+                raise TaskError("drive_raw: the base or an arm is already at the table")
+            self._end_stream()
+            t0, nxt, q0, self.base_mode = time.time(), 0.0, self._wheels(), mode
+            try:
+                while time.time() - t0 < seconds:
+                    t_loop = time.time()
+                    self._check()
+                    if t_loop - t0 >= nxt:
+                        p, q = self.base_pose(), self._wheels()
+                        self.event(f"raw t={t_loop - t0:.1f} s pose ({p[0]:.3f}, {p[1]:.3f}, {np.degrees(p[2]):.1f} deg) wheels turned right {q[0] - q0[0]:+.2f} left {q[1] - q0[1]:+.2f} rad")
+                        nxt += 0.5
+                    self._send_base(v, w)
+                    self._tick(t_loop)
+            finally:
+                self._stop_base()
+                self.base_mode = "se2"
+                time.sleep(1.0)
+            p = self.base_pose()
+            self.event(f"raw end pose ({p[0]:.3f}, {p[1]:.3f}, {np.degrees(p[2]):.1f} deg)")
+        self._run("drive_raw", body)
 
     def drive(self, forward=0.0, turn_deg=0.0, home=False):
         """Roll the base: first turn by `turn_deg` (positive = left), then forward by `forward` m (negative = back); or `home`: back to the start
@@ -636,18 +711,25 @@ class GraspRobot:
                 if abs(forward) > B.TOL_LIN:
                     self.event(f"drive: forward {forward * 100:+.0f} cm")
                     self._drive_segment("forward", float(forward))
-            else:          # the way back can be longer than one command: several, each checked on its own
-                t1, d, t2 = B.way_home(self.base_pose())
-                for kind, amount in (("turn", t1), ("forward", d), ("turn", t2)):
-                    big, tol = (B.MAX_TURN, B.TOL_ANG) if kind == "turn" else (B.MAX_FORWARD, B.TOL_LIN)
-                    while abs(amount) > tol:
-                        step = float(np.clip(amount, -big, big))
-                        problems = B.check_move(self.base_pose(), step if kind == "forward" else 0.0, step if kind == "turn" else 0.0, arm(), self.footprint)
-                        if problems:
-                            raise TaskError("; ".join(problems))
-                        self.event(f"drive home: {kind} {np.degrees(step):+.0f} deg" if kind == "turn" else f"drive home: forward {step * 100:+.0f} cm")
-                        self._drive_segment(kind, step)
-                        amount -= step
+            else:          # the way back: one step at a time, planned again from where the base really is (a turn moves the base origin)
+                for _ in range(12):
+                    if self.odo.at_home() and abs(self.base_pose()[2]) <= B.HOME_TOL_ANG / 2:
+                        break
+                    t1, d, t2 = B.way_home(self.base_pose())
+                    kind, amount = next(((k, a) for k, a, tol in (("turn", t1, B.TOL_ANG), ("forward", d, B.TOL_LIN), ("turn", t2, B.TOL_ANG)) if abs(a) > tol), (None, 0.0))
+                    if kind is None:
+                        break
+                    step = float(np.clip(amount, -(B.MAX_TURN if kind == "turn" else B.MAX_FORWARD), B.MAX_TURN if kind == "turn" else B.MAX_FORWARD))
+                    problems = B.check_move(self.base_pose(), step if kind == "forward" else 0.0, step if kind == "turn" else 0.0, arm(), self.footprint,
+                                            check_range=False)
+                    if problems:
+                        raise TaskError("; ".join(problems))
+                    self.event(f"drive home: {kind} {np.degrees(step):+.0f} deg" if kind == "turn" else f"drive home: forward {step * 100:+.0f} cm")
+                    self._drive_segment(kind, step)
+                if not self.odo.at_home():
+                    x, y, yaw = self.base_pose()
+                    raise TaskError(f"could not get exactly back to the start pose: {np.hypot(x, y) * 100:.0f} cm and {np.degrees(yaw):.0f} degrees off "
+                                    f"(the simulated base turns poorly: its turns swing the base about 20-60 cm); the manipulation skills stay refused")
             x, y, yaw = self.base_pose()
             self.event(f"base at ({x:.3f}, {y:.3f}), heading {np.degrees(yaw):.1f} deg")
         self._run("drive", body)

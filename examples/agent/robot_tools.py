@@ -66,6 +66,12 @@ def get_state(offline):
     return r
 
 
+def base_of(state):
+    """(x, y, yaw rad) of the base in the world from a state reply, or None at the start pose / offline."""
+    b = state["robot"].get("base")
+    return None if not b or (b[0] == b[1] == b[2] == 0.0) else (b[0], b[1], np.radians(b[2]))
+
+
 def get_boxes(offline):
     if offline:
         return {}
@@ -127,15 +133,15 @@ def cmd_fk(args):
 
 def cmd_check(args):
     traj = load_traj(args)
-    q = get_state(args.offline)["joints"]
-    violations, summary = S.check(q, traj, get_boxes(args.offline))
+    st = get_state(args.offline)
+    violations, summary = S.check(st["joints"], traj, get_boxes(args.offline), base=base_of(st))
     out({"ok": not violations, "violations": violations, **summary})
     return 0 if not violations else 1
 
 
 def run_trajectory(traj, offline):
-    q = get_state(offline)["joints"]
-    violations, summary = S.check(q, traj, get_boxes(offline))
+    st = get_state(offline)
+    violations, summary = S.check(st["joints"], traj, get_boxes(offline), base=base_of(st))
     if violations:
         out({"ok": False, "violations": violations})
         return 1

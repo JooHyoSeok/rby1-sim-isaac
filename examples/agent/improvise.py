@@ -42,9 +42,9 @@ try values and read where the hand, wrist, elbow and head end up; probe, then de
 violations, fix exactly those (they contain numbers). (5) `move` it. (6) Answer in ONE short sentence in the user's language saying what you did. If the
 motion is a reusable gesture and it ran, `save` it first with a short English name (wave, nod, ...).
 Rules: only these commands; small simple motions; stay inside the limits `limits` reports; never try to get around a violation, change the plan.
-Driving is refused when the arm or base would hit the table (the error says so): then move the arm up and back first, or drive less. While the base is
-away from its start pose the arms cannot be moved by `move`: drive home first. "Turn right" can mean the head, the upper body or the whole base:
-pick what fits the request and say which you chose.
+Driving is refused when the arm or base would hit the table (the error says so): then move the arm up and back first, or drive less. The simulated base
+turns poorly (a turn swings it 20-60 cm and takes long): prefer straight moves, head and torso turns when they do the job. "Turn right" can mean the
+head, the upper body or the whole base: pick what fits the request and say which you chose. Arm motions work wherever the base stands.
 If the request needs something you cannot do (picking things up with the hands, using the grippers), say so in one sentence and do not move.
 Do not narrate between commands."""
 

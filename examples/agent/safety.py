@@ -66,8 +66,9 @@ def _limit(name):
     return lo, hi
 
 
-def check(current, traj, boxes=None):
-    """(violations, summary). `current`: {joint: rad} now; `boxes`: {name: (x, y, z)} centres or None. The summary lists where the hand tip, the
+def check(current, traj, boxes=None, base=None):
+    """(violations, summary). `current`: {joint: rad} now; `boxes`: {name: (x, y, z)} centres in the base frame or None; `base`: (x, y, yaw [rad]) of the
+    base in the world when it is not at its start pose (the table is where it is in the world, everything else here is in the base frame). The summary lists where the hand tip, the
     wrist and the elbow are at each waypoint (m, base frame) and the lowest points, so a valid plan can still be improved."""
     try:
         plan = expand(current, traj)
@@ -108,7 +109,7 @@ def check(current, traj, boxes=None):
             pts = K.all_points(full)
             for name, p in pts.items():
                 lowest[name] = min(lowest.get(name, 9.0), float(p[2]))
-                for rule, m in _clearance(name, p, boxes):
+                for rule, m in _clearance(name, p, boxes, base):
                     clear.setdefault((i, name, rule), f"waypoint {i} (at {a * 100:.0f}% of the way there): {m}")   # the first sample that breaks it
             gap = min((np.linalg.norm(pts[f"right_{r}"] - pts[f"left_{l}"]), r, l) for r in ARM_POINTS for l in ARM_POINTS)
             if gap[0] < ARM_GAP:
@@ -126,13 +127,14 @@ def check(current, traj, boxes=None):
 ARM_POINTS = ("elbow", "forearm", "wrist", "hand_mid", "hand_tip")
 
 
-def _clearance(name, p, boxes):
+def _clearance(name, p, boxes, base=None):
     """[(rule, message)] for one point of the arm: floor, table, chest, boxes."""
     x, y, z = (float(c) for c in p)
+    wx, wy = (x, y) if base is None else (base[0] + np.cos(base[2]) * x - np.sin(base[2]) * y, base[1] + np.sin(base[2]) * x + np.cos(base[2]) * y)
     out = []
     if z < FLOOR_CLEAR:
         out.append(("floor", f"{name} at z = {z:.2f} m is below the floor clearance ({FLOOR_CLEAR} m)"))
-    if x > TABLE_X and abs(y) < TABLE_Y and z < TABLE_TOP + TABLE_CLEAR:
+    if wx > TABLE_X and abs(wy) < TABLE_Y and z < TABLE_TOP + TABLE_CLEAR:
         out.append(("table", f"{name} at ({x:.2f}, {y:.2f}, {z:.2f}) is within {TABLE_CLEAR * 100:.0f} cm of the table (top {TABLE_TOP} m): keep z >= {TABLE_TOP + TABLE_CLEAR:.2f}"))
     side = name.split("_")[0]
     wrong_side = y > -CHEST_Y if side == "right" else y < CHEST_Y

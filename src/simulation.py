@@ -216,7 +216,7 @@ class Simulation:
 
             rby1_vision.setup(lambda: omni.usd.get_context().get_stage())
             stage = omni.usd.get_context().get_stage()
-            self._vision_poll = lambda: rby1_vision.poll_commands(stage)
+            self._vision_poll = lambda: (rby1_vision.poll_commands(stage), rby1_vision.publish_base_pose(self.robot))
         self.world.pause()
 
     def reset_simulation(self) -> None:

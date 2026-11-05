@@ -630,7 +630,13 @@ def test_base_motion():
     ready = {**dict(zip(K.TORSO, [0, 1, -2, 1, 0, 0.0])), **dict(zip(K.RIGHT_ARM, [0, 0, 0, -1.8, 0, 0.3, -1.57]))}
     ready_pts = list(K.all_points(ready).values())
     start = (0.0, 0.0, 0.0)
-    assert B.check_move(start, 0.10, 0.0, hang) == [] and B.check_move(start, -0.20, 0.0, hang) == [] and B.check_move(start, 0.0, np.radians(-60), hang) == []
+    assert B.check_move(start, 0.10, 0.0, hang) == [] and B.check_move(start, -0.20, 0.0, hang) == [] and B.check_move(start, 0.0, np.radians(-30), hang) == []
+    assert "run into the table" in B.check_move(start, 0.0, np.radians(-60), hang)[0]           # a big turn swings a corner into the table: back up first
+    assert B.check_move((-0.25, 0.0, 0.0), 0.0, np.radians(-60), hang) == []
+    # already so close that the margin is used up: backing away is allowed, going in is not
+    close = (0.25, 0.0, 0.0)
+    assert B.penetration(close, hang) > 0 and B.check_move(close, -0.15, 0.0, hang) == []
+    assert "already close" in B.check_move(close, 0.05, 0.0, hang)[0]
     assert "run into the table" in B.check_move(start, 0.25, 0.0, hang)[0]                    # 35 cm front + 25 cm > the table edge at 53 cm
     assert "arm would hit the table" in B.check_move(start, 0.05, 0.0, ready_pts)[0]            # the READY hand is over the table edge once it rolls forward
     assert any("at most 30 cm" in m for m in B.check_move(start, 0.5, 0.0, hang))
@@ -644,19 +650,20 @@ def test_drive():
     r = object.__new__(grasp_core.GraspRobot)
     r.events, r.abort_flag, r._depth, r.phase, r.holding, r.held, r.stream = [], threading.Event(), 0, "idle", False, None, None
     r.event, r._check, r._tick = r.events.append, (lambda: None), (lambda t_loop: sim.step(1.0 / grasp_core.RATE))
-    r.state, r.footprint, r._odo_lock = (lambda: {"joints": {}}), B.FOOTPRINT, threading.Lock()
+    r.state, r.footprint, r._odo_lock, r.gt_base = (lambda: {"joints": {}}), B.FOOTPRINT, threading.Lock(), None
     r._end_stream = lambda: None
 
     class Sim:
         """A differential-drive base that follows the commanded (v, w) at once; wheel joint angles as the SDK would report them."""
         def __init__(self):
             self.q, self.sent, self.pose = [0.0, 0.0], [], np.zeros(3)
+            self.sign = B.FORWARD_SIGN                      # how the (simulated) wheels really turn, whatever the odometry assumes
 
         def step(self, dt):
             v, w = self.sent[-1] if self.sent else (0.0, 0.0)
             dr, dl = (v + w * B.TRACK / 2) * dt, (v - w * B.TRACK / 2) * dt
-            self.q[0] += dr / (B.WHEEL_R * B.FORWARD_SIGN)
-            self.q[1] += dl / (B.WHEEL_R * B.FORWARD_SIGN)
+            self.q[0] += dr / (B.WHEEL_R * self.sign)
+            self.q[1] += dl / (B.WHEEL_R * self.sign)
             self.pose += [v * dt * np.cos(self.pose[2]), v * dt * np.sin(self.pose[2]), w * dt]
     sim = Sim()
     r._wheels = lambda: tuple(sim.q)
@@ -669,16 +676,27 @@ def test_drive():
     assert max(abs(v) for v, _ in sim.sent) <= B.V_MAX + 1e-9 and sim.sent[-1] == (0.0, 0.0)          # never above the limit, ends stopped
     r.drive(turn_deg=-30)
     assert abs(np.degrees(r.base_pose()[2]) + 30) < 1.0 and abs(np.degrees(sim.pose[2]) + 30) < 1.0, r.base_pose()
-    # away from the start pose: manipulation refuses, with the way out
+    # the seed pose needs room ahead of the base: measured to the table where it really is, from wherever the base stands
+    r.seeded, r.gt_base = False, (np.array([0.2, 0.0, 0.0]), __import__("time").time())
     try:
-        r._require_base_home()
-        raise AssertionError("expected a TaskError")
+        r._require_table_clear_for_seed()
+        raise AssertionError("expected a TaskError")                                                  # the base stands 20 cm closer to the table
     except grasp_core.TaskError as exc:
-        assert "drive back first" in str(exc)
+        assert "cm ahead of the base" in str(exc), str(exc)
+    r.gt_base = None
+    r.odo = B.Odometry(*sim.q, pose=tuple(sim.pose))                                                  # the test's fake true pose was swapped for a made-up one above
     r.drive(home=True)
     x, y, yaw = r.base_pose()
     assert np.hypot(x, y) < B.HOME_TOL_LIN and abs(yaw) < B.HOME_TOL_ANG and r.odo.at_home(), (x, y, yaw)
-    r._require_base_home()                                                                            # at home again: fine
+    r._require_table_clear_for_seed()                                                                 # at home again: the table is 58 cm ahead: fine
+    # the simulator's true pose wins while it is fresh (the wheels slip when turning), the odometry takes over when it stops
+    import time as _time
+    r.gt_base = (np.array([0.02, -0.01, 0.1]), _time.time())
+    assert np.allclose(r.base_pose(), [0.02, -0.01, 0.1]) and not r.odo.at_home()                 # 0.1 rad = 5.7 degrees off
+    r.gt_base = (np.array([0.0, 0.0, 0.0]), _time.time() - 5.0)                                    # stale: back to the wheels
+    assert np.allclose(r.base_pose(), r.odo.pose) and np.allclose(r.base_pose(), [0.02, -0.01, 0.1], atol=1e-6)
+    r.odo = B.Odometry(*sim.q)
+    r.gt_base = None
     # refused: too far, into the table; nothing is sent
     sent = len(sim.sent)
     for kw, text in (({"forward": 0.5}, "at most 30 cm"), ({"forward": 0.3}, "run into the table"), ({"turn_deg": 120}, "at most 90 degrees")):
@@ -688,6 +706,21 @@ def test_drive():
         except grasp_core.TaskError as exc:
             assert text in str(exc), (kw, str(exc))
     assert len(sim.sent) == sent
+    # a wheel sign that is the wrong way round must stop the base within a few centimetres, not run away
+    flip, B.FORWARD_SIGN = B.FORWARD_SIGN, -B.FORWARD_SIGN
+    try:
+        r.odo = B.Odometry(*sim.q)           # the odometry now disagrees with the simulated wheels
+        sent = len(sim.sent)
+        try:
+            r.drive(forward=-0.1)
+            raise AssertionError("expected a TaskError")
+        except grasp_core.TaskError as exc:
+            assert "wrong way" in str(exc), str(exc)
+        assert len(sim.sent) - sent < 30 and sim.sent[-1] == (0.0, 0.0) and abs(sim.pose[0]) < 0.1, (len(sim.sent) - sent, sim.pose)
+    finally:
+        B.FORWARD_SIGN = flip
+        r.odo = B.Odometry(*sim.q)
+        sim.pose[:] = 0.0
     # abort in the middle: the wheels are told to stop
     calls = []
     original = r._send_base
@@ -705,6 +738,44 @@ def test_drive():
     except grasp_core.Aborted:
         pass
     assert sim.sent[-1] == (0.0, 0.0) and abs(r.base_pose()[0]) < 0.19
+
+
+def test_base_frame():
+    """The base may stand anywhere: boxes seen in the world are handed on in the base frame, spots and table checks follow the base."""
+    import math
+    # scene_config helpers
+    base = (0.1, -0.2, math.radians(30))
+    for x, y in ((0.5, 0.1), (-0.3, 0.2)):
+        assert np.allclose(C.world_to_base(base, *C.base_to_world(base, x, y)), (x, y))
+    assert abs(C.table_front_distance((0.0, 0.0, 0.0)) - 0.58) < 0.02 and C.table_front_distance((-0.3, 0.0, 0.0)) > 0.85       # backed up: more room
+    assert C.table_front_distance((0.2, 0.0, 0.0)) < C.SEED_EDGE_X and C.table_front_distance((2.0, 0.0, math.pi)) > 0.5       # too close / table behind: other cases
+    # a box standing where the table is: valid in the base frame of a shifted base only if it is on the table in the world
+    assert C.check_pose(0.64, -0.20, 0.72) is None
+    shifted = (-0.2, 0.0, 0.0)                                                      # the base backed up 20 cm: the same box is 20 cm further away in its frame
+    wx, wy = C.base_to_world(shifted, 0.84, -0.20)                                  # (0.64, -0.20) in the world is (0.84, -0.20) in this base's frame
+    assert abs(wx - 0.64) < 1e-9 and C.check_pose(0.84, -0.20, 0.72, base=shifted) is not None          # out of reach from there ("out of reach")
+    # free spots: the same table, a base that stands a little off and turned still finds spots, all on the table in the world and in reach
+    boxes = {"blue": (0.62, -0.34, 0.76)}
+    turned = (0.05, 0.05, math.radians(15))
+    spot = C.direction_spot("right", boxes, exclude="blue", base=turned)
+    assert spot is not None and C.on_table(*spot, base=turned) and C.wrist_distance(C.box_tip(*spot, C.TABLE_TOP)) <= C.MAX_REACH
+    # taking a stack apart from a displaced base: the start spots are world positions, the answer is in the base frame
+    base = (0.0, -0.05, 0.0)
+    stack_b = {"blue": (0.62, -0.29, 0.76), "green": (0.62, -0.29, 0.84), "yellow": (0.62, -0.05 - 0.0, 0.76)}      # blue + green stacked at world y = -0.34; yellow at its start spot
+    spot = C.table_spot("green", stack_b, base=base)
+    assert spot is not None and np.allclose(C.base_to_world(base, *spot), C.BOX_DEFAULTS["green"], atol=1e-9), spot   # its own start spot, seen from the shifted base
+    # Perception hands the boxes on in the base frame
+    p = grasp_core.Perception.__new__(grasp_core.Perception)
+    p.base_pose = lambda: (0.0, 0.0, 0.0)
+    data = {"boxes": {"blue": {"t": [0.62, -0.2, 0.76], "R": np.eye(3).tolist(), "n": 4}}}
+    p._to_base(data)
+    assert data["boxes"]["blue"]["t"] == [0.62, -0.2, 0.76]                          # at the start pose nothing changes
+    p.base_pose = lambda: (0.1, 0.2, math.pi / 2)                                   # the base stands at (0.1, 0.2) facing +y
+    data = {"boxes": {"blue": {"t": [0.62, -0.2, 0.76], "R": np.eye(3).tolist(), "n": 4}}}
+    p._to_base(data)
+    t = data["boxes"]["blue"]["t"]
+    assert np.allclose(t, [-0.4, -0.52, 0.76], atol=1e-9), t                         # 0.4 m to its right (-y in its frame): x' = dy = -0.4, y' = -dx = -0.52
+    assert np.allclose(np.array(data["boxes"]["blue"]["R"]), np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]), atol=1e-9)   # the box is turned by -90 degrees in that frame
 
 
 def test_unstack():
@@ -803,7 +874,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_unstack, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_base_frame, test_unstack, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

@@ -19,6 +19,7 @@ succeeded, 1 when it failed or was refused (busy, out of reach, box not seen), 2
 """
 import argparse
 import json
+import math
 import os
 import socket
 import sys
@@ -90,6 +91,12 @@ def get_scene():
     return r
 
 
+def base_of(scene):
+    """(x, y, yaw rad) of the base in the world from a scene reply; None while it stands at its start pose. Box positions in a scene reply are in the base frame."""
+    b = scene.get("robot", {}).get("base")
+    return None if not b or (b[0] == b[1] == b[2] == 0.0) else (b[0], b[1], math.radians(b[2]))
+
+
 def positions(scene):
     return {c: tuple(b["pos"]) for c, b in scene["boxes"].items()}
 
@@ -97,7 +104,8 @@ def positions(scene):
 def cmd_scene(args):
     s = get_scene()
     pos = positions(s)
-    s["free_spots"] = {d: C.direction_spot(d, pos) for d in DIRECTIONS}
+    base = base_of(s)
+    s["free_spots"] = {d: C.direction_spot(d, pos, base=base) for d in DIRECTIONS}
     s["unseen"] = [c for c in C.BOX_NAMES if c not in pos]
     print(json.dumps(s, indent=1))
     return 0
@@ -110,7 +118,7 @@ def cmd_move(args):
         if args.color not in pos:
             print(f"FAILED: cannot see the {args.color} box")
             return 1
-        spot = C.direction_spot(args.where[0], pos, exclude=args.color)
+        spot = C.direction_spot(args.where[0], pos, exclude=args.color, base=base_of(s))
         if spot is None:
             print(f"FAILED: no free reachable spot to the {args.where[0]} (the arm reaches a narrow band of the table: "
                   f"see `scene` free_spots)")
@@ -160,6 +168,12 @@ def main(argv=None):
     p.add_argument("--turn", type=float, default=0.0, help="degrees, positive = left")
     p.add_argument("--home", action="store_true", help="back to the start pose")
     p.set_defaults(fn=lambda a: run_task({"cmd": "drive", "forward": a.forward, "turn_deg": a.turn, "home": a.home}))
+    p = sub.add_parser("drive-raw")
+    p.add_argument("v", type=float, help="m/s, at most 0.15")
+    p.add_argument("w", type=float, help="rad/s, at most 0.5")
+    p.add_argument("seconds", type=float, help="at most 6")
+    p.add_argument("--wheels", action="store_true", help="command the wheel joints directly instead of the SDK's planar velocity")
+    p.set_defaults(fn=lambda a: run_task({"cmd": "drive_raw", "v": a.v, "w": a.w, "seconds": a.seconds, "mode": "wheels" if a.wheels else "se2"}))
     sub.add_parser("abort").set_defaults(fn=lambda a: run_task({"cmd": "abort"}, 5.0))
     p = sub.add_parser("gripper")
     p.add_argument("closeness", type=float)
