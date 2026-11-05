@@ -29,13 +29,16 @@ STEREO_EYE = np.array([float(v) for v in os.environ.get("RBY1_STEREO_EYE", "1.4,
 STEREO_TARGET = np.array([0.5, 0.0, 0.85])
 STEREO_BASELINE = 0.12
 
-# Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the
-# wrist link; the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()). The camera
-# sits on the thin (y) side, slightly behind the gripper base, and looks past the fingertips.
-WRIST_CAM = {
-    "left": (np.array([0.0, 0.09, -0.03]), np.array([0.0, -0.09, -0.32]), np.array([1.0, 0.0, 0.0])),
-    "right": (np.array([0.0, -0.09, -0.03]), np.array([0.0, 0.09, -0.32]), np.array([1.0, 0.0, 0.0])),
-}
+# Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the wrist link;
+# the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()), the palm ends at about
+# z=-0.2 where the fingers attach. A camera on the thin side cannot see the fingertips (its own side plate hides them), so
+# the camera sits under the palm, between the fingers, and looks along the tool axis: the object stays in view and at the
+# image centre from far away down to the grasp, the open fingers fall outside the field of view (checked by projecting the
+# gripper geometry, see the commit message). Image right = x of the wrist link = the finger opening axis.
+# Not verified in the renderer yet: if the palm mesh reaches below z=-0.205 the camera starts inside it (move WRIST_CAM_Z).
+WRIST_CAM_Z = -0.205
+WRIST_CAM = {side: (np.array([0.0, 0.0, WRIST_CAM_Z]), np.array([0.0, 0.0, -1.0]), np.array([0.0, 1.0, 0.0]))
+             for side in ("left", "right")}
 
 FINGER_MASS = 0.02  # kg, for finger bodies whose USD sets no mass
 SPHERE_R = 0.012
@@ -91,12 +94,12 @@ def _look_at_matrix(eye, forward, up) -> Gf.Matrix4d:
     return Gf.Matrix4d().SetLookAt(eye, eye + forward, up).GetInverse()
 
 
-def _camera(stage, path: str, matrix: Gf.Matrix4d) -> None:
+def _camera(stage, path: str, matrix: Gf.Matrix4d, near: float = 0.05) -> None:
     cam = UsdGeom.Camera.Define(stage, path)
     cam.GetFocalLengthAttr().Set(FOCAL_MM)
     cam.GetHorizontalApertureAttr().Set(H_APERTURE_MM)
     cam.GetVerticalApertureAttr().Set(H_APERTURE_MM * IMAGE_H / IMAGE_W)
-    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10.0))
+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(near, 10.0))
     cam.AddTransformOp().Set(matrix)
 
 
@@ -174,7 +177,7 @@ def build_scene(stage) -> dict[str, str]:
     for side, link in WRIST_LINKS.items():
         pos, look, up = WRIST_CAM[side]
         path = f"{ROBOT_ROOT}/{link}/wrist_cam"
-        _camera(stage, path, _look_at_matrix(pos, look, up))
+        _camera(stage, path, _look_at_matrix(pos, look, up), near=0.01)  # the object gets within 3 cm of the lens
         cams[f"wrist_{side}"] = path
         for i, p in enumerate(EE_LANDMARKS, 1):
             _sphere(stage, f"{ROBOT_ROOT}/{link}/P{i}", p, (1, 0, 0), red)
