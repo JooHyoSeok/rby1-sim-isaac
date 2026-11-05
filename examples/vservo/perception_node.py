@@ -11,7 +11,8 @@ Also publishes debug images for RViz and servo_viewer.py (the executor, hybrid_g
   /rby1/servo_debug/stereo_right  blobs and the box poses fitted from the stereo pair, landmarks reprojected
 Sends JSON datagrams to 127.0.0.1:5102 at ~10 Hz:
   {"stamp": sim time [s], "boxes": {"blue": {"R": 3x3, "t": [x, y, z], "n": landmarks used, "rms": m}, ...},   boxes seen with >= 3 landmarks
-   "wrist": {"blue": [[u, v, area], ...], ...}}   blobs of each box colour in the right hand's camera
+   "wrist": {"blue": [[u, v, area], ...], ...},        blobs of each box colour in the right hand's camera
+   "wrist_left": {...}}                                the same for the left hand's camera (the overlay shows the camera of the arm at work)
 The stereo extrinsics come from rby1_gt.json here (the simulator's ground truth); the real pipeline puts the result of
 the eye-to-hand calibration (HW7) there. The servo stage does not depend on them being exact.
 """
@@ -50,7 +51,7 @@ def to_array(m):
     return np.frombuffer(bytes(m.data), np.uint8).reshape(m.height, m.width, -1)[:, :, :3]
 
 
-for cam in ("stereo_left", "stereo_right", "wrist_right"):
+for cam in ("stereo_left", "stereo_right", "wrist_right", "wrist_left"):
     node.create_subscription(Image, f"/rby1/{cam}/image_raw",
                              lambda m, cam=cam: latest.__setitem__(cam, (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, to_array(m), m.header.stamp)), 2)
 
@@ -149,19 +150,23 @@ def record(wrist_img, stereo_img):
 
 
 def tick():
-    if not all(k in latest for k in ("stereo_left", "stereo_right", "wrist_right")):
+    if not all(k in latest for k in ("stereo_left", "stereo_right", "wrist_right", "wrist_left")):
         return
     stamp = latest["stereo_left"][0]
     poses = V.box_poses(latest["stereo_left"][1], latest["stereo_right"][1], T_L, T_R)
     boxes = {c: {"R": R.tolist(), "t": (t + args.bias).tolist(), "rms": rms, "n": n} for c, (R, t, rms, n) in poses.items()}
     wrist_blobs = {c: V.blobs(latest["wrist_right"][1], color=c) for c in V.BOX_COLORS}   # close up the spheres are big: no area limit
     wrist = {c: [list(b) for b in bl] for c, bl in wrist_blobs.items()}
+    left_blobs = {c: V.blobs(latest["wrist_left"][1], color=c) for c in V.BOX_COLORS}
     stamp_msg = latest["stereo_right"][2]
-    wrist_img, stereo_img = draw_wrist(latest["wrist_right"][1], wrist_blobs), draw_stereo(latest["stereo_right"][1], poses)
+    left_at_work = time.time() - dbg["t"] < 4.0 and dbg["d"].get("arm") == "left"          # the overlay (same topic for the GUI) shows the hand that is working
+    cam, cam_blobs = ("wrist_left", left_blobs) if left_at_work else ("wrist_right", wrist_blobs)
+    wrist_img, stereo_img = draw_wrist(latest[cam][1], cam_blobs), draw_stereo(latest["stereo_right"][1], poses)
     pub["wrist_right"].publish(to_msg(wrist_img, stamp_msg))
     pub["stereo_right"].publish(to_msg(stereo_img, stamp_msg))
     record(wrist_img, stereo_img)
-    sock.sendto(json.dumps({"stamp": stamp, "boxes": boxes, "wrist": wrist}).encode(), ("127.0.0.1", 5102))
+    sock.sendto(json.dumps({"stamp": stamp, "boxes": boxes, "wrist": wrist,
+                            "wrist_left": {c: [list(b) for b in bl] for c, bl in left_blobs.items()}}).encode(), ("127.0.0.1", 5102))
 
 
 node.create_timer(0.1, tick)

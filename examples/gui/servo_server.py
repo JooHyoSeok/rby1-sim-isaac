@@ -5,8 +5,8 @@ them one at a time on the robot (grasp_core.py).
   docker exec rby1-sim-isaac /isaac-sim/python.sh /tmp/servo_server.py        (examples/gui/run_gui.sh does all of it)
 
 Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yellow" ("blue" when no colour is given):
-  {"cmd": "seed"}                                  torso squat + bent arm (done automatically before the first pick)
-  {"cmd": "pick", "color": "green", "use_image": true, "bias": [0,0,0]}
+  {"cmd": "seed", "arm": "right"}                  torso squat + bent arm (done automatically before the first pick)
+  {"cmd": "pick", "color": "green", "arm": "auto" | "left" | "right", "use_image": true, "bias": [0,0,0]}   "auto": the arm that holds its hand most comfortably
   {"cmd": "place", "x": .., "y": .., "top": ..}    put the held box down at (x, y) on a table of height `top`
   {"cmd": "place_on", "base": "green"}             put the held box on top of the green box
   {"cmd": "pick_place", "color": .., "x": .., "y": .., "top": ..}
@@ -17,7 +17,7 @@ Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yello
                                                    the start pose (best effort: the simulated base turns poorly). Picking, stacking and the joint
                                                    tools work wherever the base stands: the boxes are converted to the base frame with its true pose.
   {"cmd": "home"}                                  open the gripper and go back to the seed pose
-  {"cmd": "gripper", "closeness": 0..1}
+  {"cmd": "gripper", "closeness": 0..1, "arm": "right" | "left"}
   {"cmd": "scene"}                                 reply only (see below): the boxes as the robot sees them, and its state
   {"cmd": "state"}                                 reply only: joint positions by name [rad], the right fingertips, status
   {"cmd": "joints", "trajectory": {"unit": "deg", "waypoints": [{"t": 2, "right_arm_1": -90}, ...]}}   a joint trajectory (examples/agent)
@@ -139,15 +139,16 @@ class Server:
     def _dispatch(self, msg):
         r, cmd = self.robot, msg["cmd"]
         if cmd == "seed":
-            r.seed()
+            r.seed(msg.get("arm", "right"))
         elif cmd == "pick":
-            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
+            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))), arm=msg.get("arm", "auto"))
         elif cmd == "place":
             r.place(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP))
         elif cmd == "place_on":
             r.place_on(msg["base"])
         elif cmd == "pick_place":
-            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
+            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))), arm=msg.get("arm", "auto"),
+                   dest=(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP)))               # the arm must reach the place as well
             r.place(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP))
         elif cmd == "stack":
             r.stack(list(msg["order"]))
@@ -162,7 +163,7 @@ class Server:
         elif cmd == "home":
             r.home()
         elif cmd == "gripper":
-            r.set_gripper(msg["closeness"])
+            r.set_gripper(msg["closeness"], msg.get("arm", "right"))
 
 
 if __name__ == "__main__":

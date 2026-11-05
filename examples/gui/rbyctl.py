@@ -2,10 +2,11 @@
 """Command-line skills for the RB-Y1 executor (servo_server.py): what a script or a language model calls to drive the robot.
 
   rbyctl.py scene                          the boxes as the stereo rig sees them (centre, what each rests on), the robot's state, free spots
-  rbyctl.py pick green                     visual-servo to the green box, grasp, lift
+  rbyctl.py pick green [--arm left|right]  visual-servo to the green box, grasp, lift; the arm that holds its hand most comfortably unless named
   rbyctl.py place 0.62 -0.30               put the held box on the table at (x, y)
   rbyctl.py place-on green                 put the held box on top of the green box (aligned by the stereo rig)
-  rbyctl.py move blue right                pick the blue box and put it on the free spot furthest right (left | near | far | center), or at x y
+  rbyctl.py move blue right [--arm ..]     pick the blue box and put it on the free spot furthest right (left | near | far | center), or at x y;
+                                           the spot must be reachable by the arm that picks
   rbyctl.py stack green blue yellow        bottom first; the first box stays where it is
   rbyctl.py unstack                        take a stack apart: top box first onto free table spots (its own start spot when free)
   rbyctl.py drive [--forward M] [--turn DEG] [--home]   roll the base (turn first, positive = left; at most 30 cm / 90 deg per command), or back to the start
@@ -105,7 +106,7 @@ def cmd_scene(args):
     s = get_scene()
     pos = positions(s)
     base = base_of(s)
-    s["free_spots"] = {d: C.direction_spot(d, pos, base=base) for d in DIRECTIONS}
+    s["free_spots"] = {d: C.direction_spot(d, pos, base=base, arm=None) for d in DIRECTIONS}      # reachable by either arm
     s["unseen"] = [c for c in C.BOX_NAMES if c not in pos]
     print(json.dumps(s, indent=1))
     return 0
@@ -118,7 +119,7 @@ def cmd_move(args):
         if args.color not in pos:
             print(f"FAILED: cannot see the {args.color} box")
             return 1
-        spot = C.direction_spot(args.where[0], pos, exclude=args.color, base=base_of(s))
+        spot = C.move_spot(args.where[0], args.color, pos, base=base_of(s), arm=None if args.arm == "auto" else args.arm)
         if spot is None:
             print(f"FAILED: no free reachable spot to the {args.where[0]} (the arm reaches a narrow band of the table: "
                   f"see `scene` free_spots)")
@@ -127,7 +128,7 @@ def cmd_move(args):
         x, y = spot
     else:
         x, y = float(args.where[0]), float(args.where[1])
-    return run_task({"cmd": "pick_place", "color": args.color, "x": x, "y": y, "top": C.TABLE_TOP})
+    return run_task({"cmd": "pick_place", "color": args.color, "x": x, "y": y, "top": C.TABLE_TOP, "arm": args.arm})
 
 
 def cmd_set_box(args):
@@ -146,7 +147,8 @@ def main(argv=None):
     sub.add_parser("scene").set_defaults(fn=cmd_scene)
     p = sub.add_parser("pick")
     color(p)
-    p.set_defaults(fn=lambda a: run_task({"cmd": "pick", "color": a.color}))
+    p.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
+    p.set_defaults(fn=lambda a: run_task({"cmd": "pick", "color": a.color, "arm": a.arm}))
     p = sub.add_parser("place")
     p.add_argument("x", type=float)
     p.add_argument("y", type=float)
@@ -157,6 +159,7 @@ def main(argv=None):
     p = sub.add_parser("move")
     color(p)
     p.add_argument("where", nargs="+", help="right | left | near | far | center, or x y")
+    p.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
     p.set_defaults(fn=cmd_move)
     p = sub.add_parser("stack")
     p.add_argument("order", nargs="+", choices=C.BOX_NAMES, help="bottom first")

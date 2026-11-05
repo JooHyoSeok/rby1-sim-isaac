@@ -30,11 +30,12 @@ import scene_config as C  # noqa: E402
 DIRECTIONS = ("right", "left", "near", "far", "center")
 SKILLS = {"stack": {"order"}, "unstack": set(), "move": {"color", "to"}, "pick": {"color"}, "place": {"x", "y"}, "place_on": {"base"}, "home": set(),
           "improvise": {"request"}, "drive": set()}
-OPTIONAL = {"drive": {"forward_m", "turn_deg", "home"}}
+OPTIONAL = {"drive": {"forward_m", "turn_deg", "home"}, "pick": {"arm"}, "move": {"arm"}}
+ARMS = ("left", "right")
 MODEL, ESCALATE = "claude-haiku-5-5", "claude-sonnet-5-5"
 
-SYSTEM = """You plan tasks for a humanoid robot (RB-Y1) that moves three 5 cm boxes on a table with its RIGHT arm. You do not control the motors: you
-choose skills; a visual-servo executor carries them out and checks reach and clearance.
+SYSTEM = """You plan tasks for a humanoid robot (RB-Y1) that moves three 5 cm boxes on a table with its two arms. You do not control the motors: you
+choose skills; a visual-servo executor carries them out, uses the arm that holds its hand most comfortably for each box, and checks reach and clearance.
 
 Boxes: "blue", "green", "yellow". Frame: x forward from the robot, y to the robot's left, so the robot's RIGHT is -y. Words like
 right / left / near (towards the robot) / far (away from it) / center refer to that frame.
@@ -45,8 +46,9 @@ Skills (JSON objects in "steps", run in order). "Put the boxes back / take the s
   {"skill": "unstack"}                                       take a stack apart again: the boxes that rest on others are put back on the
                                                              table, top first, each on a free spot (its own start spot if free). Needs a stack.
   {"skill": "move", "color": "blue", "to": "right"}          pick the box and put it on the free table spot furthest right | left | near |
-                                                             far, or the best central spot ("center"), or at {"to": [x, y]}.
-  {"skill": "pick", "color": "blue"}                         pick the box up (the hand must be empty)
+                                                             far, or the best central spot ("center"), or at {"to": [x, y]}. Optional "arm".
+  {"skill": "pick", "color": "blue", "arm": "left"}          pick the box up (the hand must be empty). "arm" ("left" | "right") is optional: leave it out
+                                                             unless the user names a hand; the executor then takes the arm named by "best_arm".
   {"skill": "place", "x": 0.62, "y": -0.3}                   put the held box on the table at (x, y)
   {"skill": "place_on", "base": "green"}                     put the held box on top of the green box
   {"skill": "home"}                                          open the hand and return to the ready pose (hand must be empty)
@@ -62,6 +64,9 @@ You are given the scene as JSON: "boxes" (position in metres, "on": the box it r
 (the colour in the hand or null), "possible_moves" (for each box and direction the spot it would be put on, or null when there is no free
 reachable spot or it is already there), and "suggested_stack_order" (the order that is easiest to reach: use it unless the user names an order).
 
+Each box has "best_arm" in the scene (the arm that reaches it most comfortably, null when neither can): boxes on the robot's left side are the left arm's,
+on its right side the right arm's; the middle of the far table is out of reach for both. A stack is built where its bottom box stands, so every box must be
+reachable by an arm that can also reach that place.
 Rules: use only these skills and only boxes that are seen. Do not invent positions: prefer directions over coordinates. If the request is
 impossible, unclear, or already satisfied, return no steps and say why. If the hand holds a box, the plan must start by putting it down
 (place or place_on). Answer with ONE JSON object and nothing else:
@@ -78,9 +83,9 @@ def base_of(scene):
     return None if not b or (b[0] == b[1] == b[2] == 0.0) else (b[0], b[1], math.radians(b[2]))
 
 
-def resolve_spot(color, to, boxes, base=None):
+def resolve_spot(color, to, boxes, base=None, arm=None):
     """Where the `color` box would be put for direction `to`, or None: no free reachable spot that way, or it already stands there."""
-    spot = C.direction_spot(to, boxes, exclude=color, base=base)
+    spot = C.move_spot(to, color, boxes, base=base, arm=arm)
     if spot is None or ((spot[0] - boxes[color][0]) ** 2 + (spot[1] - boxes[color][1]) ** 2) ** 0.5 <= 0.03:
         return None
     return list(spot)
@@ -89,13 +94,13 @@ def resolve_spot(color, to, boxes, base=None):
 # ---- context for the model (pure) -----------------------------------------------------------------------------------------------
 def build_context(scene):
     boxes = {c: tuple(b["pos"]) for c, b in scene["boxes"].items()}
-    ctx = {"boxes": {c: {"pos": [round(v, 2) for v in b["pos"]], "on": b.get("on")} for c, b in scene["boxes"].items()},
+    ctx = {"boxes": {c: {"pos": [round(v, 2) for v in b["pos"]], "on": b.get("on"), "best_arm": b.get("best_arm")} for c, b in scene["boxes"].items()},
            "unseen": [c for c in C.BOX_NAMES if c not in boxes], "holding": scene.get("robot", {}).get("held"),
            "possible_moves": {}}
     for c in boxes:
         moves = {}
         for d in DIRECTIONS:
-            moves[d] = resolve_spot(c, d, boxes, base_of(scene))
+            moves[d] = resolve_spot(c, d, boxes, base_of(scene))             # reachable by either arm
         ctx["possible_moves"][c] = moves
     ctx["suggested_stack_order"] = sorted(boxes, key=lambda c: (abs(boxes[c][1] - C.SHOULDER[1]), c))
     return ctx
@@ -157,18 +162,22 @@ def validate(plan, scene):
             errors += [f"{where}: {p}" for p in C.stack_problems(step["order"], {c: p for c, p in boxes.items()})] \
                 if isinstance(step["order"], list) else [f"{where}: order must be a list of colours"]
         elif skill in ("move", "pick"):
-            c = step["color"]
-            if c not in boxes:
+            c, arm = step["color"], step.get("arm")
+            if "arm" in step and arm not in ARMS:
+                errors.append(f"{where}: arm must be 'left' or 'right'")
+            elif c not in boxes:
                 errors.append(f"{where}: the {c} box is not visible")
-            elif skill == "pick" and (p := C.pick_problem(c, boxes)):
+            elif skill == "pick" and arm in ARMS and (p := C.pick_problem(c, boxes, arm)):
                 errors.append(f"{where}: {p}")
+            elif skill == "pick" and arm is None and C.best_arm(c, boxes) is None:
+                errors.append(f"{where}: neither arm can pick the {c} box: " + " / ".join(p for a in ARMS if (p := C.pick_problem(c, boxes, a))))
             elif skill == "move":
                 to = step["to"]
                 if isinstance(to, str) and to in DIRECTIONS:
-                    if resolve_spot(c, to, boxes, base_of(scene)) is None:
+                    if resolve_spot(c, to, boxes, base_of(scene), arm) is None:
                         errors.append(f"{where}: there is no free reachable spot to the {to} for the {c} box (or it is already there)")
                 elif isinstance(to, list) and len(to) == 2 and all(isinstance(v, (int, float)) for v in to):
-                    if (p := C.check_pose(to[0], to[1], C.TABLE_TOP, base=base_of(scene))):
+                    if (p := C.check_pose(to[0], to[1], C.TABLE_TOP, base=base_of(scene), arm=arm)):
                         errors.append(f"{where}: ({to[0]}, {to[1]}) is not possible: {p}")
                 else:
                     errors.append(f"{where}: 'to' must be one of {list(DIRECTIONS)} or [x, y]")
@@ -236,7 +245,7 @@ def to_command(step, scene):
     if skill == "unstack":
         return {"cmd": "unstack"}
     if skill == "pick":
-        return {"cmd": "pick", "color": step["color"]}
+        return {"cmd": "pick", "color": step["color"], "arm": step.get("arm", "auto")}
     if skill == "place":
         return {"cmd": "place", "x": step["x"], "y": step["y"], "top": C.TABLE_TOP}
     if skill == "place_on":
@@ -245,10 +254,10 @@ def to_command(step, scene):
         return {"cmd": "home"}
     boxes = {c: tuple(b["pos"]) for c, b in scene["boxes"].items()}
     to = step["to"]
-    spot = resolve_spot(step["color"], to, boxes, base_of(scene)) if isinstance(to, str) else tuple(to)
+    spot = resolve_spot(step["color"], to, boxes, base_of(scene), step.get("arm")) if isinstance(to, str) else tuple(to)
     if spot is None:
         raise PlanError(f"no free reachable spot to the {to} for the {step['color']} box (or it is already there)")
-    return {"cmd": "pick_place", "color": step["color"], "x": spot[0], "y": spot[1], "top": C.TABLE_TOP}
+    return {"cmd": "pick_place", "color": step["color"], "x": spot[0], "y": spot[1], "top": C.TABLE_TOP, "arm": step.get("arm", "auto")}
 
 
 def execute(plan, run_task, get_scene, say=print):

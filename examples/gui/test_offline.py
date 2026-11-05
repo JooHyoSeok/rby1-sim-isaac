@@ -112,8 +112,10 @@ def test_helpers():
     above, down, back = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.28, 0.72)
     assert above[2] >= 0.88 and abs(above[0] - 0.625) < 1e-9 and abs(above[1] + 0.28) < 1e-9
     table_down, stack_down = np.array([0.625, -0.22, 0.764]), np.array([0.625, -0.229, 0.924])   # the third box of a stack, from the simulator run
-    assert np.allclose(grasp_core.GraspRobot._back_off(table_down) - table_down, [-0.10, 0, 0])
-    stack_back = grasp_core.GraspRobot._back_off(stack_down)
+    arm_stub = object.__new__(grasp_core.GraspRobot)
+    arm_stub.side = "right"
+    assert np.allclose(arm_stub._back_off(table_down) - table_down, [-0.10, 0, 0])
+    stack_back = arm_stub._back_off(stack_down)
     assert -0.10 < (stack_back - stack_down)[0] <= -0.04 and C.tip_reachable(stack_back)           # the arm model allows less than 10 cm back there
     top2 = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.22, 0.88)      # on a stack of two: carried above its top
     assert top2[0][2] >= 0.88 + 0.04 + grasp_core.HOVER - 1e-9 and abs(top2[1][2] - (0.88 + 0.04 + 0.004)) < 1e-9
@@ -429,7 +431,7 @@ class FakeRobot:
         if "yellow" not in order:
             raise grasp_core.TaskError("cannot see the yellow box")
 
-    def pick(self, color="blue", use_image=True, bias=(0, 0, 0)):
+    def pick(self, color="blue", use_image=True, bias=(0, 0, 0), arm="auto", dest=None):
         self.calls.append(("pick", color, use_image, bias))
         if use_image == "wait":
             self.flag.clear()
@@ -448,7 +450,7 @@ class FakeRobot:
     def home(self):
         self.calls.append(("home",))
 
-    def set_gripper(self, c):
+    def set_gripper(self, c, arm="right"):
         self.calls.append(("gripper", c))
 
 
@@ -677,7 +679,7 @@ def test_drive():
     r.drive(turn_deg=-30)
     assert abs(np.degrees(r.base_pose()[2]) + 30) < 1.0 and abs(np.degrees(sim.pose[2]) + 30) < 1.0, r.base_pose()
     # the seed pose needs room ahead of the base: measured to the table where it really is, from wherever the base stands
-    r.seeded, r.gt_base = False, (np.array([0.2, 0.0, 0.0]), __import__("time").time())
+    r.seeded, r.squatted, r.gt_base = False, False, (np.array([0.2, 0.0, 0.0]), __import__("time").time())
     try:
         r._require_table_clear_for_seed()
         raise AssertionError("expected a TaskError")                                                  # the base stands 20 cm closer to the table
@@ -778,10 +780,84 @@ def test_base_frame():
     assert np.allclose(np.array(data["boxes"]["blue"]["R"]), np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]]), atol=1e-9)   # the box is turned by -90 degrees in that frame
 
 
+def test_arms():
+    """Two arms: the reach model per arm, the comfort score and arm choice, the grippers one by one, switching arms (park, squat, ready), the choice
+    of the arm in the executor."""
+    row = {n: (*xy, 0.76) for n, xy in C.BOX_DEFAULTS.items()}
+    # the default row is the right arm's: the left shoulder is 0.44-0.56 m away sideways
+    assert all(C.best_arm(n, row) == "right" and C.pick_problem(n, row, "left") for n in row)
+    assert C.comfort(C.box_tip(0.62, -0.22, 0.72)) > C.comfort(C.box_tip(0.62, -0.34, 0.72)) > 0       # the middle of the reach is more comfortable than its edge
+    left_box = {"yellow": (0.60, 0.22, 0.76)}                                                           # a box on the left side: the left arm's
+    assert C.best_arm("yellow", left_box) == "left" and C.pick_problem("yellow", left_box, "right")
+    mid = {"blue": (0.50, -0.03, 0.76)}                                                                # in reach of both: the more comfortable one, the arm in place keeps it
+    opts = C.arm_options("blue", mid)
+    assert opts["right"]["problem"] is None and opts["left"]["problem"] is None
+    best = C.best_arm("blue", mid)
+    other = "left" if best == "right" else "right"
+    assert C.best_arm("blue", mid, prefer=other, slack=1.0) == other and C.best_arm("blue", mid, prefer=other, slack=0.0) == best
+    # a move needs ONE arm for the pick and the place: from the right band to the left side no arm can do both
+    two = {"blue": (0.62, -0.34, 0.76), "yellow": (0.60, 0.22, 0.76)}
+    assert C.move_spot("left", "blue", two) is None or C.move_spot("left", "blue", two)[1] < 0.0         # blue cannot go to the left side
+    assert C.best_arm("blue", two, spot=(0.62, 0.30)) is None and C.best_arm("yellow", two, spot=(0.60, 0.15)) == "left"
+    # a stack where the arms can reach: bottom on the right, a box from the left would need the left arm to reach the right-side stack: refused
+    assert any("out of reach" in p for p in C.stack_problems(["green", "yellow"], {"green": (0.62, -0.22, 0.76), "yellow": (0.60, 0.22, 0.76)}))
+    # the grippers are separate (library: id 0 = left, 1 = right)
+    r = object.__new__(grasp_core.GraspRobot)
+    r.side = "right"
+
+    class G:
+        min_q, max_q, target_q = np.array([0.0, 0.0]), np.array([1.0, 2.0]), np.array([1.0, 2.0])        # open: max
+    r.gripper = G()
+    r._grip(1.0, "left")
+    assert np.allclose(r.gripper.target_q, [0.0, 2.0])                                                          # only the left one closed
+    r._grip(1.0)
+    assert np.allclose(r.gripper.target_q, [0.0, 0.0])                                                          # default: the arm at work (right)
+    r._grip(0.0, "left")
+    assert np.allclose(r.gripper.target_q, [1.0, 0.0])
+    # switching arms: the other arm parks, the torso squats once, the arm goes to READY once
+    r = object.__new__(grasp_core.GraspRobot)
+    r.events, r.side, r.squatted, r.ready, r.seeded = [], "right", False, {"right": False, "left": False}, False
+    r.event = r.events.append
+    calls = []
+    r._joint_arm = lambda side, q, seconds, name: calls.append((name, side))
+    r._joint_move = lambda body, name, head_builder=None: calls.append((name, "torso"))
+    r._require_table_clear_for_seed = lambda: calls.append(("table check", ""))
+    r.cmd_tip = None
+    r.tip = lambda side=None: np.zeros(3)
+    r.hold = {"right": {}, "left": {}}
+    r.rby = type("Rby", (), {"BodyComponentBasedCommandBuilder": staticmethod(lambda: type("B", (), {"set_torso_command": lambda s, c: s})()),
+                              "TorsoCommandBuilder": staticmethod(lambda: type("T", (), {"set_command": lambda s, c: s})()),
+                              "JointPositionCommandBuilder": staticmethod(lambda: type("J", (), {"set_minimum_time": lambda s, t: s, "set_position": lambda s, q: s})())})()
+    r.robot = type("Robot", (), {"get_state": lambda s: type("S", (), {"position": np.zeros(24)})()})()
+    r._activate("right")
+    assert [c for c in calls if c[0] != "table check"] == [("torso", "torso"), ("arm", "right")] and r.ready == {"right": True, "left": False} and r.squatted
+    calls.clear()
+    r._activate("right")
+    assert calls == []                                                                                  # already so: nothing moves
+    r._activate("left")
+    assert calls == [("park", "right"), ("arm", "left")] and r.ready == {"right": False, "left": True} and r.side == "left"      # right parks, no second squat
+    # the executor's choice of the arm
+    r.perception = type("P", (), {"boxes": lambda s, max_age=1.5: {n: {"t": list(p)} for n, p in {**row, "yellow": (0.60, 0.22, 0.76)}.items()}})()
+    assert r._choose_arm("yellow", "auto") == "left" and r._choose_arm("green", "auto") == "right"
+    assert r._choose_arm("green", "right") == "right"
+    for bad in (("green", "left"), ("nothing", "auto"), ("yellow", "right")):
+        try:
+            r._choose_arm(*bad)
+            raise AssertionError(bad)
+        except grasp_core.TaskError as exc:
+            assert "reach" in str(exc) or "cannot see" in str(exc), str(exc)
+    try:
+        r._choose_arm("blue", "auto", dest=(0.60, 0.15, C.TABLE_TOP))                                   # the right arm picks it, but only the left reaches the place
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "none reaches both" in str(exc) or "neither arm" in str(exc), str(exc)
+
+
 def test_unstack():
     """GraspRobot.unstack with a fake scene: top box first, onto its own start spot, bottom box stays; a clear table is refused."""
     r = object.__new__(grasp_core.GraspRobot)
     r.events, r.abort_flag, r._depth, r.phase, r.holding, r.held = [], threading.Event(), 0, "idle", False, None
+    r.side = "right"
     r.event = r.events.append
     pos = {"blue": (0.62, -0.34, 0.76), "green": (0.62, -0.34, 0.84), "yellow": (0.62, -0.34, 0.92)}
     moved = []
@@ -875,7 +951,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_base_frame, test_unstack, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_base_frame, test_arms, test_unstack, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

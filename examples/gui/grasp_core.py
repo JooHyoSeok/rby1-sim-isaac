@@ -45,7 +45,8 @@ STACK_Z_TOL = 0.015  # [m] a placed box counts as stacked when its centre is wit
 STACK_XY_TOL = 0.02  # [m] ... and this close above it (x and y)
 R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # tool axis forward, fingers open sideways
 TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
-READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])
+READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])      # the left arm takes the same values (checked with forward kinematics: same hand orientation,
+PARK = np.zeros(7)                                                # camera on the back of the hand); the arm that is not working hangs at its side
 HOLDING_CLOSENESS = (0.2, 0.85)  # gripper closeness range of a closed hand with the 5 cm box between the fingers (about 0.5)
 
 
@@ -137,6 +138,8 @@ class GraspRobot:
         self.abort_flag = threading.Event()
         self.phase, self.holding, self.seeded = "idle", False, False
         self.held = None      # colour of the box in the hand
+        self.side, self.held_side = "right", None     # the arm a task works with / the arm that holds the box
+        self.squatted, self.ready = False, {"right": False, "left": False}     # torso squat done / which arm stands in the READY pose
         self._depth = 0       # nesting of _run / job: only the outermost one clears the abort flag
         self.robot = rby.create_robot_a("127.0.0.1:50051")
         assert self.robot.connect(), "cannot reach app_main (is run_sdk.sh running?)"
@@ -149,8 +152,10 @@ class GraspRobot:
         self.gripper.start()
         self.gripper.set_open()
         self.dyn = self.robot.get_dynamics()
-        self.fk = self.dyn.make_state(["base", "ee_right"], rby.Model_A().robot_joint_names)
-        self.left_hold = dict(zip([f"left_arm_{i}" for i in range(7)], np.array(self.robot.get_state().position)[15:22]))
+        self.fks = {s: self.dyn.make_state(["base", f"ee_{s}"], rby.Model_A().robot_joint_names) for s in C.ARMS}
+        pos = np.array(self.robot.get_state().position)
+        # the arm that is not working is held at these joint values by the whole-body Cartesian command (right arm: 8..14, left arm: 15..21)
+        self.hold = {s: dict(zip([f"{s}_arm_{i}" for i in range(7)], pos[8:15] if s == "right" else pos[15:22])) for s in C.ARMS}
         self.dbg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.stream, self._base_stream, self.base_mode = None, None, "se2"
         self.odo, self._odo_lock = B.Odometry(*self._wheels()), threading.Lock()   # the base starts at the world origin, facing +x
@@ -164,37 +169,52 @@ class GraspRobot:
         self.cmd_tip = self.tip()
 
     # ---- state -------------------------------------------------------------------------------------------------------
-    def ee_pose(self):
+    def ee_pose(self, side=None):
+        side = side or self.side
         q = np.array(self.robot.get_state().position)
         with self._fk_lock:
-            self.fk.set_q(q)
-            self.dyn.compute_forward_kinematics(self.fk)
-            return self.dyn.compute_transformation(self.fk, 0, 1)
+            fk = self.fks[side]
+            fk.set_q(q)
+            self.dyn.compute_forward_kinematics(fk)
+            return self.dyn.compute_transformation(fk, 0, 1)
 
     @staticmethod
     def tip_of(T_ee):
         return T_ee[:3, 3] + TOOL * (T_ee[:3, :3] @ np.array([0.0, 0.0, -1.0]))
 
-    def tip(self):
-        return self.tip_of(self.ee_pose())
+    def tip(self, side=None):
+        return self.tip_of(self.ee_pose(side))
 
-    def closeness(self):
-        """Right gripper: 0 open ... 1 closed (fully closed means nothing between the fingers)."""
-        g = self.gripper
+    @staticmethod
+    def _grip_id(side):
+        return 0 if side == "left" else 1          # Dynamixel ID 0 = left gripper, 1 = right (examples/gripper_example.py)
+
+    def closeness(self, side=None):
+        """Gripper of `side` (default: the arm at work): 0 open ... 1 closed (fully closed means nothing between the fingers)."""
+        g, i = self.gripper, self._grip_id(side or self.side)
         enc = dict(g.bus.group_fast_sync_read_encoder(g.GRIPPER_IDS))
-        return float(1.0 - (enc[1] - g.min_q[1]) / (g.max_q[1] - g.min_q[1]))
+        return float(1.0 - (enc[i] - g.min_q[i]) / (g.max_q[i] - g.min_q[i]))
+
+    def _grip(self, closeness, side=None):
+        """Open (0) or close (1) one gripper and leave the other as it is (the library's set_normalized moves both)."""
+        g, i = self.gripper, self._grip_id(side or self.side)
+        q = np.array(g.target_q if g.target_q is not None else (1.0 - 0.0) * (g.max_q - g.min_q) + g.min_q, float)
+        q[i] = (1.0 - float(np.clip(closeness, 0.0, 1.0))) * (g.max_q[i] - g.min_q[i]) + g.min_q[i]
+        g.target_q = q
 
     def status(self):
         x, y, yaw = self.base_pose()
         return {"phase": self.phase, "holding": self.holding, "held": self.held, "seeded": self.seeded,
-                "tip": self.tip().round(4).tolist(), "closeness": round(self.closeness(), 2), "base": [round(x, 3), round(y, 3), round(float(np.degrees(yaw)), 1)]}
+                "tip": self.tip("right").round(4).tolist(), "closeness": round(self.closeness("right"), 2), "base": [round(x, 3), round(y, 3), round(float(np.degrees(yaw)), 1)],
+                "arm": self.held_side or self.side, "ready": [s for s in C.ARMS if self.ready[s]], "tip_left": self.tip("left").round(4).tolist(),
+                "closeness_left": round(self.closeness("left"), 2)}
 
     def state(self):
         """Joint positions by name [rad] and the right hand's pose, for the agent tools (examples/agent/robot_tools.py)."""
         names = list(self.rby.Model_A().robot_joint_names)
         q = np.array(self.robot.get_state().position)
-        T = self.ee_pose()
-        return {"joints": {n: round(float(v), 5) for n, v in zip(names, q)}, "tip": self.tip_of(T).round(4).tolist(), "robot": self.status()}
+        return {"joints": {n: round(float(v), 5) for n, v in zip(names, q)}, "tip": self.tip("right").round(4).tolist(),
+                "tip_left": self.tip("left").round(4).tolist(), "robot": self.status()}
 
     def scene(self):
         """What the robot sees: the boxes from the stereo rig in the BASE frame (centre, yaw, what each rests on) and its own state (robot.base = where
@@ -205,7 +225,10 @@ class GraspRobot:
         for c, b in boxes.items():
             R = np.array(b["R"])
             yaw = (float(np.degrees(np.arctan2(R[1, 0], R[0, 0]))) + 45.0) % 90.0 - 45.0   # a box looks the same every 90 degrees
-            out[c] = {"pos": [round(v, 3) for v in b["t"]], "yaw_deg": round(yaw, 1), "landmarks": b["n"], "on": on[c]}
+            pos = {n: p["t"] for n, p in boxes.items()}
+            out[c] = {"pos": [round(v, 3) for v in b["t"]], "yaw_deg": round(yaw, 1), "landmarks": b["n"], "on": on[c],
+                      "best_arm": C.best_arm(c, pos, prefer=self.side),
+                      "arms": {a: o["problem"] is None and o["comfort"] for a, o in C.arm_options(c, pos).items()}}
         return {"boxes": out, "robot": self.status(),
                 "table": {"center": list(C.TABLE_CENTER), "size": list(C.TABLE_SIZE), "top": C.TABLE_TOP, "assumed": True}}
 
@@ -239,8 +262,8 @@ class GraspRobot:
         T[:3, :3] = R_FRONT
         T[:3, 3] = np.asarray(tip_xyz) - TOOL * np.array([1.0, 0.0, 0.0])
         cart = (rby.CartesianCommandBuilder().set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1.0))
-                .set_minimum_time(0.3).add_target("base", "ee_right", T, 0.3, 1.0, 1.0))
-        for joint, q in self.left_hold.items():
+                .set_minimum_time(0.3).add_target("base", f"ee_{self.side}", T, 0.3, 1.0, 1.0))
+        for joint, q in self.hold["left" if self.side == "right" else "right"].items():      # the other arm stays where it is
             cart.add_joint_position_target(joint, float(q))
         rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
             rby.BodyCommandBuilder().set_command(cart)))
@@ -281,8 +304,8 @@ class GraspRobot:
         """Position-controlled straight move of the fingertips along a smooth ramp, streamed."""
         start = self.cmd_tip.copy()
         target = np.asarray(target, float)
-        if not C.tip_reachable(target):
-            raise TaskError(f"{name}: target {np.round(target, 3).tolist()} is out of the arm's reach")
+        if not C.tip_reachable(target, self.side):
+            raise TaskError(f"{name}: target {np.round(target, 3).tolist()} is out of the {self.side} arm's reach")
         duration = duration or max(MOVE_MIN_TIME, float(np.linalg.norm(target - start)) / MOVE_SPEED)
         t0 = time.time()
         while time.time() - t0 < duration:
@@ -332,45 +355,91 @@ class GraspRobot:
                 self.phase = outer
 
     # ---- tasks -------------------------------------------------------------------------------------------------------
-    def seed(self):
-        """Torso squat and bent right arm: the start of every grasp (the straight arm is a Cartesian singularity)."""
-        def body():
+    def _joint_arm(self, side, q, seconds, name):
+        rby = self.rby
+        body = rby.BodyComponentBasedCommandBuilder()
+        command = rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(np.asarray(q, float)))
+        (body.set_right_arm_command if side == "right" else body.set_left_arm_command)(command)
+        self._joint_move(body, name)
+
+    def _activate(self, side):
+        """Make `side` the arm at work: the other arm hangs at its side (it would be in the way near the middle), the torso is squatted (the straight
+        arm is a Cartesian singularity), this arm stands in the READY pose. Does only what is not already so."""
+        other = "left" if side == "right" else "right"
+        if self.ready[other]:
+            self.event(f"park the {other} arm")
+            self._joint_arm(other, PARK, 6.0, "park")
+            self.ready[other] = False
+        pos = np.array(self.robot.get_state().position)
+        self.hold[other] = dict(zip([f"{other}_arm_{i}" for i in range(7)], pos[15:22] if other == "left" else pos[8:15]))
+        if not self.squatted:
             self._require_table_clear_for_seed()
-            rby = self.rby
             self.event("seed pose: torso squat")
+            rby = self.rby
             self._joint_move(rby.BodyComponentBasedCommandBuilder().set_torso_command(
                 rby.TorsoCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(6.0).set_position(TORSO))), "torso")
-            self.event("seed pose: right arm")
-            self._joint_move(rby.BodyComponentBasedCommandBuilder().set_right_arm_command(
-                rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(8.0).set_position(READY))), "arm")
-            self.cmd_tip = self.tip()
-            self.seeded = True
-        self._run("seed", body)
+            self.squatted = True
+        if not self.ready[side]:
+            self.event(f"seed pose: {side} arm")
+            self._joint_arm(side, READY, 8.0, "arm")
+            self.ready[side] = True
+        self.side, self.seeded = side, True
+        self.cmd_tip = self.tip()
+
+    def seed(self, side="right"):
+        """Torso squat and bent arm: the start of every grasp."""
+        self._run("seed", self._activate, side)
 
     def home(self):
         def body():
             if self.holding:
                 raise TaskError("the hand holds the box: place it first")
-            self.gripper.set_open()
-            self.seeded = False
-            self.seed()
+            for s in C.ARMS:
+                self._grip(0.0, s)
+            self.ready["right"] = False          # stand the right arm in the READY pose again, whatever happened to it
+            self._activate("right")
         self._run("home", body)
 
-    def set_gripper(self, closeness):
-        self.gripper.set_normalized(float(closeness))
-        if closeness < 0.5:
-            self.holding, self.held = False, None
+    def set_gripper(self, closeness, arm="right"):
+        self._grip(float(closeness), arm)
+        if closeness < 0.5 and arm == self.held_side:
+            self.holding, self.held, self.held_side = False, None, None
 
-    def pick(self, color="blue", use_image=True, bias=(0.0, 0.0, 0.0)):
-        """Visual-servo to the `color` box, close the gripper, lift. Starts from the current hand pose (seeds first if needed)."""
+    def _choose_arm(self, color, arm, dest=None):
+        """The arm that picks box `color` (and puts it at dest = (x, y, surface height), if given): `arm` if the caller named one, else the one that can
+        do it most comfortably (C.best_arm), keeping the arm already at work unless the other is clearly better. Raises with both arms' reasons."""
+        scene = {c: b["t"] for c, b in self.perception.boxes().items()}
+        if color not in scene:
+            raise TaskError(f"cannot see the {color} box")
+        spot, top = (None, C.TABLE_TOP) if dest is None else ((dest[0], dest[1]), dest[2])
+        if arm in C.ARMS:
+            problem = C.pick_problem(color, scene, arm) or (None if spot is None or C.tip_reachable(C.box_tip(*spot, top), arm)
+                                                           else f"the place at ({spot[0]:.2f}, {spot[1]:.2f}) is out of reach for the {arm} arm")
+            if problem:
+                raise TaskError(problem)
+            return arm
+        side = C.best_arm(color, scene, spot=spot, top=top, prefer=self.side)
+        if side is None:
+            reasons = [p for a in C.ARMS if (p := C.pick_problem(color, scene, a))]
+            raise TaskError("neither arm can do it: " + (" / ".join(reasons) if reasons else
+                                                         f"each arm reaches the {color} box, but none reaches both it and the place at {spot}"))
+        return side
+
+    def pick(self, color="blue", use_image=True, bias=(0.0, 0.0, 0.0), arm="auto", dest=None):
+        """Visual-servo to the `color` box, close the gripper, lift. The arm: `arm` ("right" / "left") or "auto" = the one that holds its hand most
+        comfortably (examples/gui/scene_config.py best_arm; `dest` = (x, y, height) where the box is going next, so that the arm can reach both).
+        Starts from the current hand pose (the arm is made ready first if needed, the other arm parks)."""
         def body():
             if self.holding:
                 raise TaskError(f"already holding the {self.held} box")
             if color not in C.BOX_NAMES:
                 raise TaskError(f"unknown box '{color}' (boxes: {', '.join(C.BOX_NAMES)})")
-            if not self.seeded:
-                self.seed()
-            self.gripper.set_open()
+            if not self.perception.wait_box(color, 3, abort=self.abort_flag):
+                raise TaskError(f"no pose of the {color} box from the stereo rig (perception node running? 3 landmarks visible?)")
+            side = self._choose_arm(color, arm, dest)
+            self.event(f"the {side} arm takes the {color} box")
+            self._activate(side)
+            self._grip(0.0)
             est = self.perception.wait_box(color, 6, abort=self.abort_flag)
             if not est:
                 raise TaskError(f"no pose of the {color} box from the stereo rig (perception node running? 3 landmarks visible?)")
@@ -378,20 +447,20 @@ class GraspRobot:
             box_t = np.mean([m["boxes"][color]["t"] for m in est], axis=0) + np.asarray(bias)
             scene = {c: b["t"] for c, b in self.perception.boxes().items()}
             scene[color] = box_t.tolist()
-            problem = C.pick_problem(color, scene)
+            problem = C.pick_problem(color, scene, side)
             if problem:
                 raise TaskError(problem)
             self.event(f"stereo estimate of the {color} box {np.round(box_t, 3).tolist()} ({est[-1]['boxes'][color]['n']} landmarks)")
             self._servo(color, box_R, box_t, use_image, np.asarray(bias, float))
             self.event("grasp")
             self.debug(stage="grasp", text=[f"grasp the {color} box"])
-            self.gripper.set_closed()
+            self._grip(1.0)
             self._hold(1.8)
             c = self.closeness()
             if not (HOLDING_CLOSENESS[0] < c < HOLDING_CLOSENESS[1]):
-                self.gripper.set_open()
+                self._grip(0.0)
                 raise TaskError(f"grasp missed (gripper closeness {c:.2f}: nothing between the fingers)")
-            self.holding, self.held = True, color
+            self.holding, self.held, self.held_side = True, color, side
             self.event("lift")
             self.debug(stage="lift", text=["lift"])
             base = self.cmd_tip.copy()
@@ -412,6 +481,7 @@ class GraspRobot:
         back off. With `base` (colour of the box below) the hand first aligns the held box over it with the stereo rig (_align_over)."""
         if not self.holding:
             raise TaskError("nothing in the hand: pick first")
+        self.side = self.held_side or self.side              # the arm that holds the box carries it
         what = f"on the {base} box" if base else f"at ({x:.3f}, {y:.3f})"
         above, down, back = place_waypoints(self.tip(), x, y, top)
         self.cmd_tip = self.tip()
@@ -428,8 +498,8 @@ class GraspRobot:
         self.debug(stage="place: lower", text=["place", "lower"])
         self._move_tip(down, "lower", duration=3.0)
         self.event("place: release")
-        self.gripper.set_open()
-        placed, self.holding, self.held = self.held, False, None
+        self._grip(0.0)
+        placed, self.holding, self.held, self.held_side = self.held, False, None, None
         self._hold(1.5)
         back = self._back_off(down)
         self.event(f"place: back off {np.linalg.norm(back - down) * 100:.0f} cm")
@@ -437,13 +507,12 @@ class GraspRobot:
         self.debug(stage="done", text=["done"])
         return placed
 
-    @staticmethod
-    def _back_off(down):
+    def _back_off(self, down):
         """Where the hand goes after the release: 10 cm back, less if the reach model stops it earlier (on a stack the wrist is closer
         to the shoulder). 4 cm is enough to clear the box with the fingers."""
         for d in (0.10, 0.08, 0.06, 0.05, 0.04):
             back = down + np.array([-d, 0.0, 0.0])
-            if C.tip_reachable(back):
+            if C.tip_reachable(back, self.side):
                 return back
         raise TaskError(f"cannot back off from the box placed at {np.round(down, 3).tolist()}: out of reach")
 
@@ -461,8 +530,8 @@ class GraspRobot:
                 raise TaskError(f"no pose of the {base} box from the stereo rig")
             bx, by, bz = np.mean([m["boxes"][base]["t"] for m in est], axis=0)
             top = bz + C.BOX_SIZE[2] / 2
-            if not C.tip_reachable((bx + C.TIP_BEYOND_CENTRE, by, top + C.BOX_SIZE[2] / 2 + HOVER)):
-                raise TaskError(f"the top of the {base} box at ({bx:.2f}, {by:.2f}, {top:.2f}) is out of reach")
+            if not C.tip_reachable((bx + C.TIP_BEYOND_CENTRE, by, top + C.BOX_SIZE[2] / 2 + HOVER), self.held_side or self.side):
+                raise TaskError(f"the top of the {base} box at ({bx:.2f}, {by:.2f}, {top:.2f}) is out of reach for the {self.held_side or self.side} arm")
             placed = self._place_at(bx, by, top, base=base)
             self._verify_stacked(placed, base)
         self._run("place_on", body)
@@ -474,8 +543,9 @@ class GraspRobot:
             problems = C.stack_problems(order, {c: b["t"] for c, b in self.perception.boxes().items()})
             if problems:
                 raise TaskError("; ".join(problems))
-            for below, c in zip(order, order[1:]):
-                self.pick(c)
+            bx, by, _ = self.perception.boxes()[order[0]]["t"]
+            for k, (below, c) in enumerate(zip(order, order[1:]), 1):
+                self.pick(c, dest=(bx, by, C.TABLE_TOP + k * C.BOX_SIZE[2]))          # the arm that can pick it AND reach this level of the stack
                 self.place_on(below)
         self._run("stack", body)
 
@@ -493,11 +563,17 @@ class GraspRobot:
                 if not order:
                     break
                 c = order[0]
-                spot = C.table_spot(c, boxes, base=tuple(float(v) for v in self.base_pose()))   # boxes and the spot are in the base frame, the table is not
-                if spot is None:
+                base = tuple(float(v) for v in self.base_pose())
+                others = [a for a in C.ARMS if a != self.side]
+                for arm in [self.side] + others:               # the arm already at work first; its own spot (reachable for it), else the other arm
+                    spot = C.table_spot(c, boxes, base=base, arm=arm)
+                    if spot is not None and C.best_arm(c, boxes, spot=spot, top=C.TABLE_TOP) is not None:
+                        break
+                else:
                     raise TaskError(f"no free table spot for the {c} box")
+                arm = C.best_arm(c, boxes, spot=spot, top=C.TABLE_TOP, prefer=arm)
                 self.event(f"unstack: the {c} box goes to ({spot[0]:.2f}, {spot[1]:.2f})")
-                self.pick(c)
+                self.pick(c, arm=arm, dest=(spot[0], spot[1], C.TABLE_TOP))
                 self.place(spot[0], spot[1])
                 self._verify_on_table(c)
                 done += 1
@@ -559,8 +635,11 @@ class GraspRobot:
                 self._joint_move(body_b, f"waypoint {i}", head_builder=head_b)
                 cur.update(q)
             self.cmd_tip = self.tip()
-            self.left_hold = {f"left_arm_{k}": cur[f"left_arm_{k}"] for k in range(7)}   # the Cartesian streams of the next pick hold the left arm HERE
-            self.seeded = False       # the arm is wherever the trajectory left it: the next pick seeds first
+            for s in C.ARMS:      # the Cartesian streams of the next pick hold the arm that is not at work HERE; both arms are wherever the trajectory left them
+                self.hold[s] = {f"{s}_arm_{k}": cur[f"{s}_arm_{k}"] for k in range(7)}
+            self.ready = {"right": False, "left": False}
+            self.squatted = self.squatted and abs(cur.get("torso_5", 0.0)) < 1e-3     # a turned torso: squat again (that also straightens it)
+            self.seeded = False       # the next pick makes its arm ready first
         self._run("joints", body)
 
     # ---- the base ----------------------------------------------------------------------------------------------------
@@ -589,7 +668,7 @@ class GraspRobot:
 
     def _require_table_clear_for_seed(self):
         """The squat of the seed pose needs room in front of the base (C.SEED_EDGE_X): the table is where it is in the world, the base may stand anywhere."""
-        if self.seeded:
+        if self.squatted:
             return
         ahead = C.table_front_distance(self.base_pose())
         if ahead < C.SEED_EDGE_X:
@@ -805,7 +884,7 @@ class GraspRobot:
                 last_n, data, t_msg = perception.n, perception.data, perception.t
                 if use_image:
                     T_then = pose_at(t_msg - LATENCY)
-                    blobs = np.array(data["wrist"].get(color) or np.zeros((0, 3)))
+                    blobs = np.array(data["wrist" if self.side == "right" else "wrist_left"].get(color) or np.zeros((0, 3)))   # the camera on the hand at work
                     centre, Z, n_seen = servo.box_in_ee(blobs, servo.cam_pose(T_then), box_R, box_t)
                     if centre is not None and n_seen >= 2:
                         c_world, src = (T_then @ np.r_[centre, 1])[:3], "image"
@@ -833,7 +912,7 @@ class GraspRobot:
                     self.cmd_tip = self.tip_of(T_ee) + lead * LEAD_MAX / np.linalg.norm(lead)
                 ok_ticks = ok_ticks + 1 if (remaining < DONE_REMAIN and np.hypot(*lat) < DONE_LAT) else 0
                 if tick % 2 == 0:
-                    self.debug(stage=f"continuous servo ({src})", err_mm=[lat[0] * 1000, lat[1] * 1000], remaining_mm=remaining * 1000,
+                    self.debug(stage=f"continuous servo ({src})", arm=self.side, err_mm=[lat[0] * 1000, lat[1] * 1000], remaining_mm=remaining * 1000,
                                text=[f"continuous servo to the {color} box, measured by the {src}",
                                      f"lateral error {lat[0] * 1000:+.1f} / {lat[1] * 1000:+.1f} mm, {remaining * 1000:.0f} mm to go"], **view)
                 if ok_ticks >= int(0.25 * RATE):

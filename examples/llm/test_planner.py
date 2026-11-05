@@ -78,7 +78,7 @@ def test_validate():
     s = scene()
     del s["boxes"]["yellow"]
     real = P.resolve_spot
-    P.resolve_spot = lambda color, to, boxes, base=None: [0.55, -0.30]                  # a table pulled closer would have room: pretend
+    P.resolve_spot = lambda color, to, boxes, base=None, arm=None: [0.55, -0.30]                  # a table pulled closer would have room: pretend
     try:
         assert P.validate({"steps": [{"skill": "move", "color": "blue", "to": "left"}]}, s) == []
     finally:
@@ -90,13 +90,15 @@ def test_commands():
     s = scene()
     del s["boxes"]["yellow"]
     assert P.to_command({"skill": "stack", "order": ["a", "b"]}, s) == {"cmd": "stack", "order": ["a", "b"]}
+    assert P.to_command({"skill": "pick", "color": "blue"}, s) == {"cmd": "pick", "color": "blue", "arm": "auto"}
+    assert P.to_command({"skill": "pick", "color": "blue", "arm": "left"}, s)["arm"] == "left"
     real = P.resolve_spot
-    P.resolve_spot = lambda color, to, boxes, base=None: [0.55, -0.30]
+    P.resolve_spot = lambda color, to, boxes, base=None, arm=None: [0.55, -0.30]
     try:
         cmd = P.to_command({"skill": "move", "color": "blue", "to": "left"}, s)
     finally:
         P.resolve_spot = real
-    assert cmd == {"cmd": "pick_place", "color": "blue", "x": 0.55, "y": -0.30, "top": C.TABLE_TOP}
+    assert cmd == {"cmd": "pick_place", "color": "blue", "x": 0.55, "y": -0.30, "top": C.TABLE_TOP, "arm": "auto"}
     assert P.to_command({"skill": "move", "color": "blue", "to": [0.62, -0.3]}, s)["x"] == 0.62
     try:
         P.to_command({"skill": "move", "color": "blue", "to": "right"}, ROW)
