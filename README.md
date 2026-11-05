@@ -71,11 +71,25 @@ from the v1.2 asset and rby1-sdk `models/rby1m/urdf/model_v1.3.urdf`). Its end
 effector is not detachable: the gripper bodies and finger joints are part of the
 robot USD, so `--gripper` drives them directly instead of mounting an
 `assets/gripper/` asset. The v1.3 finger joints open at +0.05 m (v1.2: -0.05 m);
-the `rb_gripper` server handles the sign per model.
+the `rb_gripper` server handles the sign per model. As on the robot, where the
+v1.3 gripper is driven by the UPC and not by the rby1 core, the simulated gripper
+is commanded through the sim-gripper bridge (ports 5007/5008), not through
+`app_main`.
+
+The `0.11.0-m_v1.3-isaac6.1.0` image builds the rby1 core for M v1.3 and selects
+this model by default (`ROBOT_MODEL_NAME`/`ROBOT_MODEL_VERSION` of the image), so
+`--model m_v1.3` is only needed with another image:
 
 ```bash
-./docker/run.sh --image <m image> --model m_v1.3 --gripper
+./docker/run_sdk.sh --image 0.11.0-m_v1.3-isaac6.1.0 --gripper
+./docker/run.sh --image 0.11.0-m_v1.3-isaac6.1.0 --gripper
 ```
+
+The v1.3 wrist modules have not been identified on a robot. The WR roll is a
+100:1 drive (v1.2: 200:1), so the identified v1.2 wrist-roll values do not apply;
+until a v1.3 robot is measured, all three wrist joints use the v1.2 wrist (arm_4)
+motor model, servo gains, command delays and drive limit (70 N·m)
+(`RBY1_MODEL_CONFIGS["m_v1.3"].motor_group_overrides` in `src/rby1_task.py`).
 
 ### Run options
 
@@ -175,6 +189,9 @@ flag is required.
 
 | Tag | Model | Isaac Sim | rby1 core (`feature/isaac-sim`) |
 |-----|-------|-----------|------------|
+| `0.11.0-a_v1.2-isaac6.1.0` | Model A v1.2 | 6.1.0 | 70b17cc: 0.11.0 core (torso_3/4 coupled limit, friction compensation parameter, rby1-sdk 0.10.1) on the Isaac lockstep changes |
+| `0.11.0-m_v1.2-isaac6.1.0` | Model M v1.2 | 6.1.0 | 70b17cc |
+| `0.11.0-m_v1.3-isaac6.1.0` | Model M v1.3 (built-in gripper) | 6.1.0 | 70b17cc |
 | `0.10.7-a_v1.2-isaac6.1.0-r1` | Model A v1.2 | 6.1.0 | df9d04d: hardware velocity estimation, `RBY1_HEADLESS`, lockstep without the core's period wait |
 | `0.10.7-m_v1.2-isaac6.1.0-r1` | Model M v1.2 | 6.1.0 | df9d04d |
 | `0.10.7-a_v1.2-isaac6.1.0` | Model A v1.2 | 6.1.0 | ad75916 |
@@ -191,7 +208,8 @@ intervals under load, and joint impedance steps of the wrist and wrist roll over
 ```
 rainbowroboticsofficial/rby1-sim-isaac:<version>-<model>_v<model_version>[-isaac<isaac_version>][-r<rebuild>]
 
-e.g.) rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2, Isaac Sim 6.1.0, rebuild 1
+e.g.) rainbowroboticsofficial/rby1-sim-isaac:0.11.0-m_v1.3-isaac6.1.0      # Model M v1.3, Isaac Sim 6.1.0
+      rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2, Isaac Sim 6.1.0, rebuild 1
       rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0      # Model A v1.2, Isaac Sim 6.1.0
       rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2                 # Model A v1.2, Isaac Sim 5.1.0
 

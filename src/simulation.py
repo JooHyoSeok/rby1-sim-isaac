@@ -470,15 +470,27 @@ class ExternalForceUI:
         self._update_continuous_status()
 
 
+# Keys of rby1_task.RBY1_MODEL_CONFIGS (not imported here: rby1_task needs a running SimulationApp).
+MODEL_CHOICES = ("m", "a", "m_v1.3")
+
+
+def _default_model_from_env() -> str:
+    """Model key for the image's ROBOT_MODEL_NAME / ROBOT_MODEL_VERSION (A/M -> a/m, M 1.3 -> m_v1.3)."""
+    name = os.environ.get("ROBOT_MODEL_NAME", "m").strip().lower() or "m"
+    version = os.environ.get("ROBOT_MODEL_VERSION", "").strip()
+    versioned = f"{name}_v{version}" if version else ""
+    return versioned if versioned in MODEL_CHOICES else name
+
+
 def _build_argparser():
     import argparse
 
     p = argparse.ArgumentParser(description="RBY1 Isaac Sim Simulation")
-    # Default model comes from the ROBOT_MODEL_NAME env var that the per-model
-    # image sets (A/M -> a/m), so the a/m images each load their own USD asset
-    # without requiring an explicit --model flag. Can still be overridden.
-    default_model = os.environ.get("ROBOT_MODEL_NAME", "m").strip().lower() or "m"
-    p.add_argument("--model", type=str.lower, choices=("m", "a", "m_v1.3"), default=default_model,
+    # Default model comes from the ROBOT_MODEL_NAME / ROBOT_MODEL_VERSION env vars
+    # that the per-model image sets (A/M -> a/m, M 1.3 -> m_v1.3), so each image
+    # loads its own USD asset without an explicit --model flag. Can still be overridden.
+    default_model = _default_model_from_env()
+    p.add_argument("--model", type=str.lower, choices=MODEL_CHOICES, default=default_model,
                    help="RBY1 model selection: m, a or m_v1.3 (default from ROBOT_MODEL_NAME env)")
     p.add_argument("--udp", action="store_true",
                help="Enable rby1-sdk UDP bridge")
