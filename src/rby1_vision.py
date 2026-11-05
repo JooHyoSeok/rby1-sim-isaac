@@ -13,7 +13,9 @@ ROS 2 topics (sim-time stamped, published at the render rate, so pass ``--render
 """
 from __future__ import annotations
 
+import json
 import os
+import socket
 
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
@@ -307,6 +309,63 @@ def write_gt(stage, path: str) -> None:
     print(f"[Vision] ground truth written to {path}")
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Runtime scene commands (UDP, JSON, port COMMAND_PORT): move the box and the table while the simulation runs.
+#   {"cmd": "set_box", "x": .., "y": .., "yaw_deg": 0}        box centre on the table (z follows the table top), upright
+#   {"cmd": "set_table", "x": .., "y": .., "top": ..}         table centre and top height [m]
+#   {"cmd": "reset"}                                           defaults
+# Sent by examples/gui (the control centre); applied on the simulation thread, between physics steps.
+# ---------------------------------------------------------------------------------------------------------------------
+COMMAND_PORT = 5110
+_cmd_sock = None
+_table_top = TABLE_TOP
+
+
+def _start_command_server() -> None:
+    global _cmd_sock
+    _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    _cmd_sock.bind(("127.0.0.1", COMMAND_PORT))
+    _cmd_sock.setblocking(False)
+
+
+def _place_box(stage, x: float, y: float, yaw_deg: float = 0.0) -> None:
+    obj = stage.GetPrimAtPath("/World/Object")
+    api = UsdGeom.XformCommonAPI(obj)
+    api.SetTranslate(Gf.Vec3d(x, y, _table_top + OBJECT_SIZE[2] / 2 + 0.002))
+    api.SetRotate(Gf.Vec3f(0.0, 0.0, yaw_deg), UsdGeom.XformCommonAPI.RotationOrderXYZ)
+    body = UsdPhysics.RigidBodyAPI(obj)
+    body.CreateVelocityAttr().Set(Gf.Vec3f(0.0))
+    body.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0))
+
+
+def _place_table(stage, x: float, y: float, top: float) -> None:
+    global _table_top
+    _table_top = top
+    UsdGeom.XformCommonAPI(stage.GetPrimAtPath("/World/Table")).SetTranslate(Gf.Vec3d(x, y, top - TABLE_SIZE[2] / 2))
+
+
+def poll_commands(stage) -> None:
+    """Apply the pending scene commands (call once per simulation step)."""
+    if _cmd_sock is None:
+        return
+    while True:
+        try:
+            msg = json.loads(_cmd_sock.recv(4096))
+        except BlockingIOError:
+            return
+        except ValueError:
+            continue
+        cmd = msg.get("cmd")
+        if cmd == "set_table":
+            _place_table(stage, msg["x"], msg["y"], msg["top"])
+        elif cmd == "set_box":
+            _place_box(stage, msg["x"], msg["y"], msg.get("yaw_deg", 0.0))
+        elif cmd == "reset":
+            _place_table(stage, TABLE_CENTER[0], TABLE_CENTER[1], TABLE_TOP)
+            _place_box(stage, OBJECT_POS[0], OBJECT_POS[1])
+        print(f"[Vision] scene command: {msg}", flush=True)
+
+
 def setup(stage_getter) -> None:
     """Enable the ROS 2 bridge, build the scene and the publishing graph (call after the robot is in the stage)."""
     from isaacsim.core.utils.extensions import enable_extension
@@ -316,4 +375,5 @@ def setup(stage_getter) -> None:
     cams = build_scene(stage)
     build_ros_graph(cams, stage)
     write_gt(stage, os.environ.get("RBY1_GT_PATH", "/isaac-sim/.local/share/ov/data/rby1_gt.json"))
+    _start_command_server()
     print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")

@@ -149,6 +149,7 @@ class Simulation:
         self.task.gripper_colliders = vision
         self.world.add_task(self.task)
         self._vision = vision
+        self._vision_poll = None  # scene commands from the control centre (rby1_vision.poll_commands), set once the scene exists
         self.robot = None
         self.reset_needed = False
 
@@ -214,6 +215,8 @@ class Simulation:
             import rby1_vision
 
             rby1_vision.setup(lambda: omni.usd.get_context().get_stage())
+            stage = omni.usd.get_context().get_stage()
+            self._vision_poll = lambda: rby1_vision.poll_commands(stage)
         self.world.pause()
 
     def reset_simulation(self) -> None:
@@ -266,6 +269,8 @@ class Simulation:
 
     def simulation_step(self) -> None:
         """Run one physics step and decouple rendering from the physics rate."""
+        if self._vision_poll is not None:
+            self._vision_poll()
         if self.world.is_playing():
             # Isaac lockstep: World.step(render=False) drives one physics step and the task pre_step.
             if not self._timing_log:
