@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Course scene add-on: stereo rig, wrist cameras, red/blue/yellow landmarks and ROS 2 publishing.
+"""Course scene add-on: stereo rig, wrist cameras, coloured landmarks, three stackable boxes and ROS 2 publishing.
 
 Enabled with ``--vision``. Everything here is visual or kinematic (no new rigid bodies except a static table), so
 the robot dynamics and the rby1-sdk UDP path are untouched. All poses below are first guesses in metres: check them
@@ -51,9 +51,15 @@ TABLE_TOP = 0.72
 # A thin top without legs: a solid box down to the floor gets hit by the hand when it swings up from the hanging pose.
 TABLE_CENTER, TABLE_SIZE = (0.88, 0.0, TABLE_TOP - 0.02), (0.6, 0.8, 0.04)  # front edge x=0.58
 OBJECT_SIZE = (0.05, 0.05, 0.08)  # tall enough to be grasped above the table surface
-OBJECT_POS = (0.64, -0.20, TABLE_TOP + OBJECT_SIZE[2] / 2)  # centre of the cube resting on the table
 OBJECT_MASS, OBJECT_FRICTION = 0.1, 1.5  # a dynamic rigid body the gripper can lift
 OBJECT_LANDMARKS = [(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.037, 0.0), (-0.02, -0.037, 0.0)]
+# Three boxes that can be stacked. Each has its own landmark colour (pure sphere colour), so the perception tells the boxes apart
+# and keeps the landmarks of a stack apart (examples/vservo/vision.py BOX_COLORS repeats the names); the body is a paler tint that
+# the colour masks reject. Start positions: in a row 12 cm apart at x=0.62, the band of the default table the arm reaches
+# (examples/gui/scene_config.py BOX_DEFAULTS repeats them).
+BOXES = {"blue": {"rgb": (0.0, 0.0, 1.0), "body": (0.35, 0.5, 1.0), "xy": (0.62, -0.34)},
+         "green": {"rgb": (0.0, 1.0, 0.0), "body": (0.45, 1.0, 0.45), "xy": (0.62, -0.22)},
+         "yellow": {"rgb": (1.0, 1.0, 0.0), "body": (1.0, 0.95, 0.55), "xy": (0.62, -0.10)}}
 TARGET_SPHERES = {"R": ((0.65, 0.25, TABLE_TOP + SPHERE_R), (1, 0, 0)),
                   "B": ((0.75, 0.30, TABLE_TOP + SPHERE_R), (0, 0, 1)),
                   "Y": ((0.70, 0.18, TABLE_TOP + SPHERE_R), (1, 1, 0)),
@@ -160,10 +166,10 @@ def add_gripper_colliders(stage) -> None:
 
 
 def build_scene(stage) -> dict[str, str]:
-    """Create cameras, landmarks, table and object. Returns {topic name: camera prim path}."""
+    """Create cameras, landmarks, table and the boxes. Returns {topic name: camera prim path}."""
     red = _material(stage, "/World/Looks/red", (1, 0, 0))
     mats = {(1, 0, 0): red, (0, 0, 1): _material(stage, "/World/Looks/blue", (0, 0, 1)),
-            (1, 1, 0): _material(stage, "/World/Looks/yellow", (1, 1, 0))}
+            (1, 1, 0): _material(stage, "/World/Looks/yellow", (1, 1, 0)), (0, 1, 0): _material(stage, "/World/Looks/green", (0, 1, 0))}
 
     forward = STEREO_TARGET - STEREO_EYE
     forward = forward / np.linalg.norm(forward)
@@ -185,15 +191,17 @@ def build_scene(stage) -> dict[str, str]:
 
     _cuboid(stage, "/World/Table", TABLE_CENTER, TABLE_SIZE, (0.6, 0.5, 0.4), static_collider=True)
     friction = _friction_material(stage)
-    obj = UsdGeom.Xform.Define(stage, "/World/Object")  # unscaled parent so the landmark spheres stay round
-    UsdGeom.XformCommonAPI(obj).SetTranslate(Gf.Vec3d(*OBJECT_POS))
-    _cuboid(stage, "/World/Object/body", (0, 0, 0), OBJECT_SIZE, (0.8, 0.8, 0.8), static_collider=True)
-    UsdPhysics.RigidBodyAPI.Apply(obj.GetPrim())
-    UsdPhysics.MassAPI.Apply(obj.GetPrim()).CreateMassAttr(OBJECT_MASS)
-    UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath("/World/Object/body")).Bind(
-        friction, UsdShade.Tokens.weakerThanDescendants, "physics")
-    for i, p in enumerate(OBJECT_LANDMARKS, 1):
-        _sphere(stage, f"/World/Object/Q{i}", p, (1, 0, 0), red)
+    for name, box in BOXES.items():
+        path = f"/World/Box_{name}"
+        obj = UsdGeom.Xform.Define(stage, path)  # unscaled parent so the landmark spheres stay round
+        UsdGeom.XformCommonAPI(obj).SetTranslate(Gf.Vec3d(*box["xy"], TABLE_TOP + OBJECT_SIZE[2] / 2))
+        _cuboid(stage, f"{path}/body", (0, 0, 0), OBJECT_SIZE, box["body"], static_collider=True)
+        UsdPhysics.RigidBodyAPI.Apply(obj.GetPrim())
+        UsdPhysics.MassAPI.Apply(obj.GetPrim()).CreateMassAttr(OBJECT_MASS)
+        UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(f"{path}/body")).Bind(
+            friction, UsdShade.Tokens.weakerThanDescendants, "physics")
+        for i, p in enumerate(OBJECT_LANDMARKS, 1):
+            _sphere(stage, f"{path}/Q{i}", p, box["rgb"], mats[box["rgb"]])
     for name, (p, rgb) in TARGET_SPHERES.items():
         _sphere(stage, f"/World/Target/{name}", p, rgb, mats[rgb])
     return cams
@@ -236,7 +244,7 @@ def build_ros_graph(cams: dict[str, str], stage) -> None:
     conn += [(f"ReadJoints.outputs:{a}", f"PubJoints.inputs:{a}") for a in (
         "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
         "sensorTime")]
-    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()] + ["/World/Object"]  # rigid bodies only
+    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()] + [f"/World/Box_{n}" for n in BOXES]  # rigid bodies only
     values = []
     # /tf: link poses for RViz. Isaac publishes the flat RBY1 -> link frames AND the articulation chain (rooted at
     # link_torso_5); examples/rviz/tf_chain_relay.py keeps only the chain, which is a proper tree.
@@ -288,8 +296,8 @@ def write_gt(stage, path: str) -> None:
     gt = {"units": "m", "note": "T_a_b maps b-frame points into a; camera frames are ROS optical (+z forward, +y down)",
           "stereo": {n: _mat(flip * xf(f"/World/StereoRig/{n}").ComputeLocalToWorldTransform(0)) for n in ("stereo_left", "stereo_right")},
           "wrist": {}, "ee_landmarks_in_wrist_link": {f"P{i}": p for i, p in enumerate(EE_LANDMARKS, 1)},
-          "object_pose_world": _mat(xf("/World/Object").ComputeLocalToWorldTransform(0)),
-          "object_landmarks_in_object": {f"Q{i}": p for i, p in enumerate(OBJECT_LANDMARKS, 1)},
+          "boxes_world": {n: _mat(xf(f"/World/Box_{n}").ComputeLocalToWorldTransform(0)) for n in BOXES},
+          "box_landmarks_in_box": {f"Q{i}": p for i, p in enumerate(OBJECT_LANDMARKS, 1)},
           "target_spheres_world": {n: p for n, (p, _) in TARGET_SPHERES.items()}, "sphere_radius": SPHERE_R}
     for side, link in WRIST_LINKS.items():
         link_path = f"{ROBOT_ROOT}/{link}"
@@ -311,9 +319,11 @@ def write_gt(stage, path: str) -> None:
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Runtime scene commands (UDP, JSON, port COMMAND_PORT): move the box and the table while the simulation runs.
-#   {"cmd": "set_box", "x": .., "y": .., "yaw_deg": 0}        box centre on the table (z follows the table top), upright
+#   {"cmd": "set_box", "name": "blue", "x": .., "y": .., "yaw_deg": 0}   one box ("blue" if no name) on the table, upright (z follows the
+#                                                                          table top; a box put on another one is dropped on it)
+#   {"cmd": "set_box", "name": "green", "x": .., "y": .., "z": ..}        same, at a given centre height
 #   {"cmd": "set_table", "x": .., "y": .., "top": ..}         table centre and top height [m]
-#   {"cmd": "reset"}                                           defaults
+#   {"cmd": "reset"}                                           defaults (table and all boxes)
 # Sent by examples/gui (the control centre); applied on the simulation thread, between physics steps.
 # ---------------------------------------------------------------------------------------------------------------------
 COMMAND_PORT = 5110
@@ -328,10 +338,10 @@ def _start_command_server() -> None:
     _cmd_sock.setblocking(False)
 
 
-def _place_box(stage, x: float, y: float, yaw_deg: float = 0.0) -> None:
-    obj = stage.GetPrimAtPath("/World/Object")
+def _place_box(stage, name: str, x: float, y: float, yaw_deg: float = 0.0, z: float | None = None) -> None:
+    obj = stage.GetPrimAtPath(f"/World/Box_{name}")
     api = UsdGeom.XformCommonAPI(obj)
-    api.SetTranslate(Gf.Vec3d(x, y, _table_top + OBJECT_SIZE[2] / 2 + 0.002))
+    api.SetTranslate(Gf.Vec3d(x, y, (_table_top + OBJECT_SIZE[2] / 2 if z is None else z) + 0.002))
     api.SetRotate(Gf.Vec3f(0.0, 0.0, yaw_deg), UsdGeom.XformCommonAPI.RotationOrderXYZ)
     body = UsdPhysics.RigidBodyAPI(obj)
     body.CreateVelocityAttr().Set(Gf.Vec3f(0.0))
@@ -359,10 +369,13 @@ def poll_commands(stage) -> None:
         if cmd == "set_table":
             _place_table(stage, msg["x"], msg["y"], msg["top"])
         elif cmd == "set_box":
-            _place_box(stage, msg["x"], msg["y"], msg.get("yaw_deg", 0.0))
+            name = msg.get("name", "blue")
+            if name in BOXES:
+                _place_box(stage, name, msg["x"], msg["y"], msg.get("yaw_deg", 0.0), msg.get("z"))
         elif cmd == "reset":
             _place_table(stage, TABLE_CENTER[0], TABLE_CENTER[1], TABLE_TOP)
-            _place_box(stage, OBJECT_POS[0], OBJECT_POS[1])
+            for name, box in BOXES.items():
+                _place_box(stage, name, *box["xy"])
         print(f"[Vision] scene command: {msg}", flush=True)
 
 

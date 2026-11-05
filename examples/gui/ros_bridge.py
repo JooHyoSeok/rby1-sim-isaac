@@ -30,7 +30,8 @@ class RosBridge:
         self._lock = threading.Lock()
         self._images, self._stamps = {}, {}
         self._joints, self._joints_t = {}, 0.0
-        self._box, self._box_t = None, 0.0
+        self._box, self._box_t = None, 0.0        # the blue box: the one the map moves
+        self._boxes = {}                           # every box: colour -> (x, y, z)
         for name, topic in IMAGE_TOPICS.items():
             self.node.create_subscription(Image, topic, lambda m, name=name: self._on_image(name, m), 2)
         self.node.create_subscription(JointState, "/rby1/joint_states", self._on_joints, 5)
@@ -58,18 +59,21 @@ class RosBridge:
 
     def _on_gt(self, m):
         for t in m.transforms:
-            if t.child_frame_id == "Object":
+            if t.child_frame_id.startswith("Box_"):
+                pos = (t.transform.translation.x, t.transform.translation.y, t.transform.translation.z)
                 with self._lock:
-                    self._box = (t.transform.translation.x, t.transform.translation.y, t.transform.translation.z)
-                    self._box_t = time.time()
+                    self._boxes[t.child_frame_id[4:]] = pos
+                    if t.child_frame_id == "Box_blue":
+                        self._box, self._box_t = pos, time.time()
 
     def snapshot(self):
-        """{'images': {name: (rgb array, age s)}, 'joints': {name: rad} or {}, 'joints_age', 'box': (x, y, z) or None, 'box_age'}"""
+        """{'images': {name: (rgb array, age s)}, 'joints': {name: rad} or {}, 'joints_age', 'box': (x, y, z) or None, 'box_age',
+        'boxes': {colour: (x, y, z)}}"""
         now = time.time()
         with self._lock:
             return {"images": {n: (img, now - self._stamps[n]) for n, img in self._images.items()},
                     "joints": dict(self._joints), "joints_age": now - self._joints_t if self._joints_t else None,
-                    "box": self._box, "box_age": now - self._box_t if self._box_t else None}
+                    "box": self._box, "box_age": now - self._box_t if self._box_t else None, "boxes": dict(self._boxes)}
 
     def close(self):
         self._stop.set()

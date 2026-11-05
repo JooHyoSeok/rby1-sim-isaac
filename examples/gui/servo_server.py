@@ -4,19 +4,26 @@ them one at a time on the robot (grasp_core.py).
   docker cp examples/gui/{grasp_core,servo_server,scene_config}.py examples/vservo/{vision,servo}.py examples/gripper_example.py rby1-sim-isaac:/tmp/
   docker exec rby1-sim-isaac /isaac-sim/python.sh /tmp/servo_server.py        (examples/gui/run_gui.sh does all of it)
 
-Commands (JSON datagrams to 127.0.0.1:5120):
+Commands (JSON datagrams to 127.0.0.1:5120); boxes are "blue", "green" or "yellow" ("blue" when no colour is given):
   {"cmd": "seed"}                                  torso squat + bent arm (done automatically before the first pick)
-  {"cmd": "pick", "use_image": true, "bias": [0,0,0]}
+  {"cmd": "pick", "color": "green", "use_image": true, "bias": [0,0,0]}
   {"cmd": "place", "x": .., "y": .., "top": ..}    put the held box down at (x, y) on a table of height `top`
-  {"cmd": "pick_place", "x": .., "y": .., "top": ..}
+  {"cmd": "place_on", "base": "green"}             put the held box on top of the green box
+  {"cmd": "pick_place", "color": .., "x": .., "y": .., "top": ..}
+  {"cmd": "stack", "order": ["green", "blue", "yellow"]}   bottom first; the first box stays where it is
   {"cmd": "home"}                                  open the gripper and go back to the seed pose
   {"cmd": "gripper", "closeness": 0..1}
+  {"cmd": "scene"}                                 reply only (see below): the boxes as the robot sees them, and its state
   {"cmd": "abort"}                                 stops the running task at once (also while it is moving)
-Status goes to 127.0.0.1:5121: {"type": "status", "state": "idle"|"busy", "task": .., "phase": .., "holding": .., "seeded": ..,
+Status goes to 127.0.0.1:5121: {"type": "status", "state": "idle"|"busy", "task": .., "phase": .., "holding": .., "held": .., "seeded": ..,
 "tip": [x, y, z], "closeness": ..} twice a second and {"type": "log", "text": ..} for events and errors.
+Any command may carry "reply": PORT (examples/gui/rbyctl.py does): the log lines of that job, then {"type": "result", "ok": bool, "text": ..}
+go to 127.0.0.1:PORT as well, and "scene" is answered there as {"type": "scene", "boxes": .., "robot": .., "table": ..}.
 
-NOT RUN YET (see grasp_core.py): the dispatch logic is covered by test_offline.py with a fake robot.
+pick/place/pick_place/home were run in the simulator; the colours, place_on, stack and scene are NOT RUN YET (see grasp_core.py): the
+dispatch logic is covered by test_offline.py with a fake robot.
 """
+import contextlib
 import json
 import queue
 import socket
@@ -37,6 +44,7 @@ class Server:
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.jobs = queue.Queue()
         self.task = None
+        self.reply_to = None      # (host, port) of the client whose job is running
         self.stop = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -48,6 +56,12 @@ class Server:
     def log(self, text):
         print(text, flush=True)
         self.send({"type": "log", "text": text})
+        self.reply({"type": "log", "text": text})
+
+    def reply(self, msg, to=None):
+        to = to or self.reply_to
+        if to:
+            self.tx.sendto(json.dumps(msg).encode(), to)
 
     def _heartbeat(self):
         while not self.stop.is_set():
@@ -61,13 +75,20 @@ class Server:
     # ---- input -------------------------------------------------------------------------------------------------------
     def handle(self, msg):
         """Called for every datagram; abort acts immediately, everything else is queued (one task at a time)."""
-        cmd = msg.get("cmd")
+        cmd, to = msg.get("cmd"), ("127.0.0.1", msg["reply"]) if "reply" in msg else None
         if cmd == "abort":
             self.robot.abort()
             self.log("abort requested")
-        elif cmd in ("seed", "pick", "place", "pick_place", "home", "gripper"):
+            self.reply({"type": "result", "ok": True, "text": "abort requested"}, to)
+        elif cmd == "scene":
+            try:
+                self.reply({"type": "scene", **self.robot.scene()}, to)
+            except Exception as exc:  # noqa: BLE001 - a failing query must not take the service down
+                self.reply({"type": "result", "ok": False, "text": f"scene: {exc}"}, to)
+        elif cmd in ("seed", "pick", "place", "place_on", "pick_place", "stack", "home", "gripper"):
             if self.task and cmd != "gripper":
                 self.log(f"busy with '{self.task}': {cmd} ignored (abort first)")
+                self.reply({"type": "result", "ok": False, "text": f"busy with '{self.task}'"}, to)
             else:
                 self.jobs.put(msg)
         else:
@@ -89,17 +110,23 @@ class Server:
             except queue.Empty:
                 continue
             self.task = msg["cmd"]
+            self.reply_to = ("127.0.0.1", msg["reply"]) if "reply" in msg else None
             self.log(f"start: {msg}")
+            ok, text = False, ""
             try:
-                self._dispatch(msg)
-                self.log(f"done: {msg['cmd']}")
+                with getattr(self.robot, "job", contextlib.nullcontext)():   # one job: an abort between its tasks is kept
+                    self._dispatch(msg)
+                ok, text = True, f"done: {msg['cmd']}"
             except Aborted:
-                self.log(f"aborted: {msg['cmd']}")
+                text = f"aborted: {msg['cmd']}"
             except TaskError as exc:
-                self.log(f"failed: {msg['cmd']}: {exc}")
+                text = f"failed: {msg['cmd']}: {exc}"
             except Exception:  # noqa: BLE001 - report anything unexpected to the user instead of dying
-                self.log(f"error in {msg['cmd']}:\n{traceback.format_exc()}")
+                text = f"error in {msg['cmd']}:\n{traceback.format_exc()}"
             finally:
+                self.log(text)
+                self.reply({"type": "result", "ok": ok, "text": text})
+                self.reply_to = None
                 self.task = None
 
     def _dispatch(self, msg):
@@ -107,12 +134,16 @@ class Server:
         if cmd == "seed":
             r.seed()
         elif cmd == "pick":
-            r.pick(use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
+            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
         elif cmd == "place":
             r.place(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP))
+        elif cmd == "place_on":
+            r.place_on(msg["base"])
         elif cmd == "pick_place":
-            r.pick(use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
+            r.pick(msg.get("color", "blue"), use_image=msg.get("use_image", True), bias=tuple(msg.get("bias", (0.0, 0.0, 0.0))))
             r.place(msg["x"], msg["y"], msg.get("top", C.TABLE_TOP))
+        elif cmd == "stack":
+            r.stack(list(msg["order"]))
         elif cmd == "home":
             r.home()
         elif cmd == "gripper":

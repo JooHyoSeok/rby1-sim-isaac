@@ -1,13 +1,15 @@
-"""Robot-side building blocks for the control centre's executor service: seed pose, continuous visual-servo pick, place, home.
+"""Robot-side building blocks for the control centre's executor service: seed pose, continuous visual-servo pick, place, stack, home.
 
 Runs in the simulator container (rby1_sdk is installed only there); servo_server.py wraps it in a UDP service. The control law of the
 pick is the one of examples/vservo/hybrid_grasp.py (see its docstring for the reasoning); what is new here is that it can be aborted,
-reports what it does, can be started from any hand pose, and that a held box can be put down at a chosen place.
+reports what it does, can be started from any hand pose, and that a held box can be put down at a chosen place or on another box
+(stereo-relative alignment, see _align_over). Three boxes are told apart by the colour of their landmarks.
 
-NOT RUN YET: written while the simulator was off limits. The pure helpers (smoothstep, place_waypoints) are covered by test_offline.py,
-everything that talks to the robot is not.
+pick / place / pick_place / home were run in the simulator (single box). NOT RUN YET: the three-box perception, place_on and stack. The pure
+helpers (smoothstep, place_waypoints, scene_config) are covered by test_offline.py, everything that talks to the robot is not.
 """
 import collections
+import contextlib
 import json
 import socket
 import sys
@@ -33,7 +35,13 @@ LIFT = np.array([-0.06, 0.0, 0.12])
 LIFT_TIME = 3.5
 MOVE_SPEED = 0.10    # [m/s] position-controlled moves (place); duration = distance / speed, at least MOVE_MIN_TIME
 MOVE_MIN_TIME = 1.0
-HOVER = 0.06         # box bottom this far above the table while carrying it over the place position
+HOVER = 0.06         # box bottom this far above the surface (table or stack) while carrying it over the place position
+ALIGN_KP = 1.5       # [1/s] stack alignment: velocity = KP * offset of the held box from the box below, seen by the stereo rig
+ALIGN_V_MAX = 0.03   # [m/s]
+ALIGN_TOL = 0.003    # [m] aligned when the offset stays under this for 0.5 s
+ALIGN_TIMEOUT = 12.0 # [s]
+STACK_Z_TOL = 0.015  # [m] a placed box counts as stacked when its centre is within this of one box height above the lower one
+STACK_XY_TOL = 0.02  # [m] ... and this close above it (x and y)
 R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # tool axis forward, fingers open sideways
 TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
 READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])
@@ -80,8 +88,13 @@ class Perception:
             self.t = time.time()
             self.n += 1
 
-    def wait_box(self, count=6, timeout=8.0, abort=None):
-        """`count` fresh messages that contain a box pose from at least 3 landmarks."""
+    def boxes(self, max_age=1.5):
+        """{colour: {"R", "t", "n", "rms"}} of the boxes in the latest message (empty when it is older than max_age seconds)."""
+        d = self.data
+        return dict(d.get("boxes", {})) if d and time.time() - self.t < max_age else {}
+
+    def wait_box(self, color, count=6, timeout=8.0, abort=None):
+        """`count` fresh messages that contain a pose of the `color` box from at least 3 landmarks."""
         n0, t0, out = self.n, time.time(), []
         while len(out) < count and time.time() - t0 < timeout:
             if abort is not None and abort.is_set():
@@ -89,7 +102,7 @@ class Perception:
             if self.n != n0:
                 n0 = self.n
                 d = self.data
-                if d and d.get("box") and d["box"]["n"] >= 3:
+                if d and d.get("boxes", {}).get(color, {}).get("n", 0) >= 3:
                     out.append(d)
             time.sleep(0.02)
         return out
@@ -105,6 +118,8 @@ class GraspRobot:
         self.rby, self.servo, self.perception, self.event = rby, servo, perception, event
         self.abort_flag = threading.Event()
         self.phase, self.holding, self.seeded = "idle", False, False
+        self.held = None      # colour of the box in the hand
+        self._depth = 0       # nesting of _run / job: only the outermost one clears the abort flag
         self.robot = rby.create_robot_a("127.0.0.1:50051")
         assert self.robot.connect(), "cannot reach app_main (is run_sdk.sh running?)"
         self.robot.power_on(".*")
@@ -145,8 +160,20 @@ class GraspRobot:
         return float(1.0 - (enc[1] - g.min_q[1]) / (g.max_q[1] - g.min_q[1]))
 
     def status(self):
-        return {"phase": self.phase, "holding": self.holding, "seeded": self.seeded, "tip": self.tip().round(4).tolist(),
-                "closeness": round(self.closeness(), 2)}
+        return {"phase": self.phase, "holding": self.holding, "held": self.held, "seeded": self.seeded,
+                "tip": self.tip().round(4).tolist(), "closeness": round(self.closeness(), 2)}
+
+    def scene(self):
+        """What the robot sees: the boxes from the stereo rig (centre, yaw, what each rests on) and its own state."""
+        boxes = self.perception.boxes()
+        on = C.stacked_on({c: b["t"] for c, b in boxes.items()})
+        out = {}
+        for c, b in boxes.items():
+            R = np.array(b["R"])
+            yaw = (float(np.degrees(np.arctan2(R[1, 0], R[0, 0]))) + 45.0) % 90.0 - 45.0   # a box looks the same every 90 degrees
+            out[c] = {"pos": [round(v, 3) for v in b["t"]], "yaw_deg": round(yaw, 1), "landmarks": b["n"], "on": on[c]}
+        return {"boxes": out, "robot": self.status(),
+                "table": {"center": list(C.TABLE_CENTER), "size": list(C.TABLE_SIZE), "top": C.TABLE_TOP, "assumed": True}}
 
     def debug(self, **info):
         self.dbg.sendto(json.dumps(info).encode(), ("127.0.0.1", 5103))
@@ -237,22 +264,34 @@ class GraspRobot:
             self._stream_to(self.cmd_tip)
             self._tick(t_loop)
 
-    def _run(self, name, fn, *args, **kw):
-        """Run a task body: clears the abort flag, recovers after a fault or an abort, leaves the robot ready for the next task."""
-        self.abort_flag.clear()
-        self.phase = name
+    @contextlib.contextmanager
+    def job(self):
+        """One executor job, which may run several tasks in a row (pick, then place): an abort requested between two of them is kept."""
+        if self._depth == 0:
+            self.abort_flag.clear()
+        self._depth += 1
         try:
-            return fn(*args, **kw)
-        except TaskError:
-            try:
-                self._end_stream()
-                self._recover()
-                self.cmd_tip = self.tip()
-            except Exception:  # noqa: BLE001 - recovery is best effort, the original error is what matters
-                pass
-            raise
+            yield
         finally:
-            self.phase = "idle"
+            self._depth -= 1
+
+    def _run(self, name, fn, *args, **kw):
+        """Run a task body: clears the abort flag (outermost call only), recovers after a fault or an abort, leaves the robot ready for
+        the next task. Tasks nest (stack = pick + place_on, pick = seed first)."""
+        with self.job():
+            outer, self.phase = self.phase, name
+            try:
+                return fn(*args, **kw)
+            except TaskError:
+                try:
+                    self._end_stream()
+                    self._recover()
+                    self.cmd_tip = self.tip()
+                except Exception:  # noqa: BLE001 - recovery is best effort, the original error is what matters
+                    pass
+                raise
+            finally:
+                self.phase = outer
 
     # ---- tasks -------------------------------------------------------------------------------------------------------
     def seed(self):
@@ -281,36 +320,39 @@ class GraspRobot:
     def set_gripper(self, closeness):
         self.gripper.set_normalized(float(closeness))
         if closeness < 0.5:
-            self.holding = False
+            self.holding, self.held = False, None
 
-    def pick(self, use_image=True, bias=(0.0, 0.0, 0.0)):
-        """Visual-servo to the box, close the gripper, lift. Starts from the current hand pose (seeds first if needed)."""
+    def pick(self, color="blue", use_image=True, bias=(0.0, 0.0, 0.0)):
+        """Visual-servo to the `color` box, close the gripper, lift. Starts from the current hand pose (seeds first if needed)."""
         def body():
             if self.holding:
-                raise TaskError("already holding the box")
+                raise TaskError(f"already holding the {self.held} box")
+            if color not in C.BOX_NAMES:
+                raise TaskError(f"unknown box '{color}' (boxes: {', '.join(C.BOX_NAMES)})")
             if not self.seeded:
                 self.seed()
-                self.abort_flag.clear()
-                self.phase = "pick"
             self.gripper.set_open()
-            est = self.perception.wait_box(6, abort=self.abort_flag)
+            est = self.perception.wait_box(color, 6, abort=self.abort_flag)
             if not est:
-                raise TaskError("no box pose from the stereo rig (perception node running? 3 landmarks visible?)")
-            box_R = np.array(est[-1]["box"]["R"])
-            box_t = np.mean([m["box"]["t"] for m in est], axis=0) + np.asarray(bias)
-            if not C.tip_reachable(box_t + np.array([C.TIP_BEYOND_CENTRE, 0.0, 0.0])):
-                raise TaskError(f"the box at {np.round(box_t, 3).tolist()} is out of the arm's reach")
-            self.event(f"stereo box estimate {np.round(box_t, 3).tolist()} ({est[-1]['box']['n']} landmarks)")
-            self._servo(box_R, box_t, use_image, np.asarray(bias, float))
+                raise TaskError(f"no pose of the {color} box from the stereo rig (perception node running? 3 landmarks visible?)")
+            box_R = np.array(est[-1]["boxes"][color]["R"])
+            box_t = np.mean([m["boxes"][color]["t"] for m in est], axis=0) + np.asarray(bias)
+            scene = {c: b["t"] for c, b in self.perception.boxes().items()}
+            scene[color] = box_t.tolist()
+            problem = C.pick_problem(color, scene)
+            if problem:
+                raise TaskError(problem)
+            self.event(f"stereo estimate of the {color} box {np.round(box_t, 3).tolist()} ({est[-1]['boxes'][color]['n']} landmarks)")
+            self._servo(color, box_R, box_t, use_image, np.asarray(bias, float))
             self.event("grasp")
-            self.debug(stage="grasp", text=["grasp"])
+            self.debug(stage="grasp", text=[f"grasp the {color} box"])
             self.gripper.set_closed()
             self._hold(1.8)
             c = self.closeness()
             if not (HOLDING_CLOSENESS[0] < c < HOLDING_CLOSENESS[1]):
                 self.gripper.set_open()
                 raise TaskError(f"grasp missed (gripper closeness {c:.2f}: nothing between the fingers)")
-            self.holding = True
+            self.holding, self.held = True, color
             self.event("lift")
             self.debug(stage="lift", text=["lift"])
             base = self.cmd_tip.copy()
@@ -326,30 +368,120 @@ class GraspRobot:
             self.debug(stage="done", text=["done"])
         self._run("pick", body)
 
+    def _place_at(self, x, y, top, base=None):
+        """Carry the held box over (x, y) (rise first, so it clears boxes on the way), lower it onto a surface of height `top`, let go,
+        back off. With `base` (colour of the box below) the hand first aligns the held box over it with the stereo rig (_align_over)."""
+        if not self.holding:
+            raise TaskError("nothing in the hand: pick first")
+        what = f"on the {base} box" if base else f"at ({x:.3f}, {y:.3f})"
+        above, down, back = place_waypoints(self.tip(), x, y, top)
+        self.cmd_tip = self.tip()
+        if above[2] - self.cmd_tip[2] > 0.01:
+            self.event(f"place {what}: rise")
+            self._move_tip(np.array([self.cmd_tip[0], self.cmd_tip[1], above[2]]), "rise")
+        self.event(f"place {what}: carry")
+        self.debug(stage="place: carry", text=[f"place {what}", "carry"])
+        self._move_tip(above, "carry")
+        if base:
+            self._align_over(base)
+            down = np.array([self.cmd_tip[0], self.cmd_tip[1], down[2]])   # straight down from where the alignment ended
+            back = down + np.array([-0.10, 0.0, 0.0])
+        self.event("place: lower")
+        self.debug(stage="place: lower", text=["place", "lower"])
+        self._move_tip(down, "lower", duration=3.0)
+        self.event("place: release")
+        self.gripper.set_open()
+        placed, self.holding, self.held = self.held, False, None
+        self._hold(1.5)
+        self.event("place: back off")
+        self._move_tip(back, "back off", duration=2.0)
+        self.debug(stage="done", text=["done"])
+        return placed
+
     def place(self, x, y, top=C.TABLE_TOP):
         """Carry the held box over (x, y), lower it onto the table, let go, back off."""
+        self._run("place", self._place_at, x, y, top)
+
+    def place_on(self, base):
+        """Put the held box on top of the `base` box: position and height from the stereo rig, alignment over it, check afterwards."""
         def body():
             if not self.holding:
                 raise TaskError("nothing in the hand: pick first")
-            above, down, back = place_waypoints(self.tip(), x, y, top)
-            self.cmd_tip = self.tip()
-            self.event(f"place at ({x:.3f}, {y:.3f}): carry")
-            self.debug(stage="place: carry", text=[f"place at ({x:.3f}, {y:.3f})", "carry"])
-            self._move_tip(above, "carry")
-            self.event("place: lower")
-            self.debug(stage="place: lower", text=["place", "lower"])
-            self._move_tip(down, "lower", duration=3.0)
-            self.event("place: release")
-            self.gripper.set_open()
-            self.holding = False
-            self._hold(1.5)
-            self.event("place: back off")
-            self._move_tip(back, "back off", duration=2.0)
-            self.debug(stage="done", text=["done"])
-        self._run("place", body)
+            est = self.perception.wait_box(base, 6, abort=self.abort_flag)
+            if not est:
+                raise TaskError(f"no pose of the {base} box from the stereo rig")
+            bx, by, bz = np.mean([m["boxes"][base]["t"] for m in est], axis=0)
+            top = bz + C.BOX_SIZE[2] / 2
+            if not C.tip_reachable((bx + C.TIP_BEYOND_CENTRE, by, top + C.BOX_SIZE[2] / 2 + HOVER)):
+                raise TaskError(f"the top of the {base} box at ({bx:.2f}, {by:.2f}, {top:.2f}) is out of reach")
+            placed = self._place_at(bx, by, top, base=base)
+            self._verify_stacked(placed, base)
+        self._run("place_on", body)
+
+    def stack(self, order):
+        """Stack the boxes of `order` (colours, bottom first): the first stays where it is, every other one is picked and put on the one
+        before it. Checks the whole plan against the scene first (reach, finger clearance), so nothing starts that cannot finish."""
+        def body():
+            problems = C.stack_problems(order, {c: b["t"] for c, b in self.perception.boxes().items()})
+            if problems:
+                raise TaskError("; ".join(problems))
+            for below, c in zip(order, order[1:]):
+                self.pick(c)
+                self.place_on(below)
+        self._run("stack", body)
+
+    def _align_over(self, base):
+        """Hover loop over the `base` box: drive the held box's centre onto the base box's centre. Both are measured by the stereo rig
+        in the same image, so the (calibration) error of the rig and the tracking error of the position loop do not enter: only the
+        relative position counts. Falls back to the hand's own pose when the held box is not seen (its fingers hide landmarks)."""
+        dt, t0, ok, err_f, src = 1.0 / RATE, time.time(), 0, None, "-"
+        while time.time() - t0 < ALIGN_TIMEOUT:
+            t_loop = time.time()
+            self._check()
+            T_ee = self.ee_pose()
+            boxes = self.perception.boxes()
+            if base in boxes:
+                if self.held in boxes:
+                    held_xy, src = np.array(boxes[self.held]["t"][:2]), "stereo"
+                else:
+                    held_xy, src = self.tip_of(T_ee)[:2] - np.array([C.TIP_BEYOND_CENTRE, 0.0]), "hand"
+                err = np.array(boxes[base]["t"][:2]) - held_xy
+                err_f = err if err_f is None else 0.6 * err_f + 0.4 * err        # the stereo fit is a few mm noisy
+                v = ALIGN_KP * err_f
+                if np.linalg.norm(v) > ALIGN_V_MAX:
+                    v *= ALIGN_V_MAX / np.linalg.norm(v)
+                self.cmd_tip = self.cmd_tip + np.r_[v * dt, 0.0]
+                lead = self.cmd_tip - self.tip_of(T_ee)
+                if np.linalg.norm(lead) > LEAD_MAX:
+                    self.cmd_tip = self.tip_of(T_ee) + lead * LEAD_MAX / np.linalg.norm(lead)
+                ok = ok + 1 if np.linalg.norm(err_f) < ALIGN_TOL else 0
+                self.debug(stage="align", text=[f"align the {self.held} box over the {base} box (measured by the {src})",
+                                                f"offset {err_f[0] * 1000:+.1f} / {err_f[1] * 1000:+.1f} mm"])
+                if ok >= int(0.5 * RATE):
+                    self.event(f"aligned over the {base} box: offset {np.linalg.norm(err_f) * 1000:.1f} mm ({src})")
+                    return
+            self._stream_to(self.cmd_tip)
+            self._tick(t_loop)
+        if err_f is None:
+            raise TaskError(f"the {base} box is not visible: cannot align over it")
+        self.event(f"alignment over the {base} box did not settle within {ALIGN_TIMEOUT:.0f} s "
+                   f"(offset still {np.linalg.norm(err_f) * 1000:.1f} mm): placing anyway")
+
+    def _verify_stacked(self, color, base):
+        """After the release: is the `color` box standing on the `base` box? Logs the offset; raises when it clearly is not."""
+        est_c = self.perception.wait_box(color, 4, timeout=4.0, abort=self.abort_flag)
+        est_b = self.perception.wait_box(base, 1, timeout=2.0, abort=self.abort_flag)
+        if not est_c or not est_b:
+            self.event(f"could not check the stack ({color} or {base} box not visible)")
+            return
+        tc, tb = np.array(est_c[-1]["boxes"][color]["t"]), np.array(est_b[-1]["boxes"][base]["t"])
+        d = tc - tb
+        self.event(f"{color} box on the {base} box: offset ({d[0] * 1000:+.1f}, {d[1] * 1000:+.1f}) mm, height above it {d[2] * 1000:.0f} mm")
+        if abs(d[2] - C.BOX_SIZE[2]) > STACK_Z_TOL or abs(d[0]) > STACK_XY_TOL or abs(d[1]) > STACK_XY_TOL:
+            raise TaskError(f"the {color} box did not stay on the {base} box (offset {d.round(3).tolist()} m)")
 
     # ---- the continuous servo (examples/vservo/hybrid_grasp.py) -----------------------------------------------------------
-    def _servo(self, box_R, box_t, use_image, bias):
+    def _servo(self, color, box_R, box_t, use_image, bias):
         servo, perception = self.servo, self.perception
         hist = collections.deque(maxlen=int(3 * RATE))
 
@@ -369,7 +501,7 @@ class GraspRobot:
                 last_n, data, t_msg = perception.n, perception.data, perception.t
                 if use_image:
                     T_then = pose_at(t_msg - LATENCY)
-                    blobs = np.array(data["wrist"]) if data["wrist"] else np.zeros((0, 3))
+                    blobs = np.array(data["wrist"].get(color) or np.zeros((0, 3)))
                     centre, Z, n_seen = servo.box_in_ee(blobs, servo.cam_pose(T_then), box_R, box_t)
                     if centre is not None and n_seen >= 2:
                         c_world, src = (T_then @ np.r_[centre, 1])[:3], "image"
@@ -380,8 +512,8 @@ class GraspRobot:
                                     matched=[[k, float(p[0]), float(p[1])] for k, p in servo.match_landmarks(blobs, pred)],
                                     centre_px=px_of((to_cam @ np.r_[centre, 1])[:3]).tolist(),
                                     goal_px=px_of((to_cam @ np.r_[0.0, 0.0, centre[2], 1])[:3]).tolist(), depth_cm=Z * 100)
-                if (c_world is None or not use_image) and data.get("box"):   # no usable image (yet): the stereo measurement
-                    c_world, src = np.array(data["box"]["t"]) + bias, "stereo"
+                if (c_world is None or not use_image) and color in data.get("boxes", {}):   # no usable image (yet): the stereo measurement
+                    c_world, src = np.array(data["boxes"][color]["t"]) + bias, "stereo"
             if c_world is not None:
                 c_now = (np.linalg.inv(T_ee) @ np.r_[c_world, 1])[:3]  # box centre in the hand frame now
                 lat, remaining = c_now[:2], -c_now[2] - (TOOL - C.TIP_BEYOND_CENTRE)
@@ -398,7 +530,7 @@ class GraspRobot:
                 ok_ticks = ok_ticks + 1 if (remaining < DONE_REMAIN and np.hypot(*lat) < DONE_LAT) else 0
                 if tick % 2 == 0:
                     self.debug(stage=f"continuous servo ({src})", err_mm=[lat[0] * 1000, lat[1] * 1000], remaining_mm=remaining * 1000,
-                               text=[f"continuous servo, measured by the {src}",
+                               text=[f"continuous servo to the {color} box, measured by the {src}",
                                      f"lateral error {lat[0] * 1000:+.1f} / {lat[1] * 1000:+.1f} mm, {remaining * 1000:.0f} mm to go"], **view)
                 if ok_ticks >= int(0.25 * RATE):
                     return

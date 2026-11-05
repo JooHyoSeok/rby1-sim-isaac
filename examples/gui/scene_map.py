@@ -1,7 +1,7 @@
 """Top-down map of the scene for the control centre: robot, table, box, place target and the region the arm can reach.
 
 World frame: x forward (up on the screen), y to the left. Direct manipulation, no modes:
-  drag the orange box / the blue place target / the table      (the cursor turns into a hand over things that can be dragged)
+  drag the blue box / the place target / the table              (the cursor turns into a hand over things that can be dragged)
   mouse wheel over the box                                      turns it (5 degrees per notch)
   right click anywhere                                          menu: put the box / the place target / the table here
 A dragged box or place target snaps to the nearest position where a box can stand and be reached (unless `allow_any`), so a drag
@@ -38,6 +38,7 @@ class SceneMap(QtWidgets.QWidget):
         self.allow_any = False
         self.box_live = None        # ground truth from the simulator (x, y, z)
         self.box_xy = None          # where the box was last asked to go (x, y)
+        self.other_boxes = {}       # the green and yellow box: colour -> (x, y, z) from the simulator; shown, not draggable
         self.box_yaw = 0.0
         self.target = None          # place target (x, y)
         self.hover = None
@@ -53,6 +54,10 @@ class SceneMap(QtWidgets.QWidget):
 
     def set_box_live(self, xyz):
         self.box_live = xyz
+        self.update()
+
+    def set_other_boxes(self, boxes):
+        self.other_boxes = dict(boxes)
         self.update()
 
     def set_box(self, xy, yaw=None):
@@ -202,10 +207,16 @@ class SceneMap(QtWidgets.QWidget):
         # the box: the simulator's actual position, and the dragged one while a drag is going on
         bp = self._box_pos()
         if bp is not None:
-            self._draw_box(p, bp[0], bp[1], self.box_yaw, QtGui.QPen(QtGui.QColor(255, 160, 40), 2), QtGui.QColor(230, 130, 20))
+            self._draw_box(p, bp[0], bp[1], self.box_yaw, QtGui.QPen(QtGui.QColor(120, 160, 255), 2), QtGui.QColor(50, 80, 230))
             if self.box_live is not None:
-                p.setPen(QtGui.QColor(255, 200, 120))
-                p.drawText(self.to_px(bp[0] + 0.06, bp[1] - 0.045), f"z {self.box_live[2]:.2f}")
+                p.setPen(QtGui.QColor(170, 195, 255))
+                p.drawText(self.to_px(bp[0] + 0.05, bp[1] - 0.045), "blue" + (f" z {self.box_live[2]:.2f}" if self.box_live[2] > 0.78 else ""))
+        shades = {"green": (QtGui.QColor(120, 230, 120), QtGui.QColor(40, 170, 40)), "yellow": (QtGui.QColor(255, 240, 120), QtGui.QColor(220, 190, 30))}
+        for name, (ox, oy, oz) in self.other_boxes.items():
+            line, fill = shades.get(name, (QtGui.QColor(200, 200, 200), QtGui.QColor(120, 120, 120)))
+            self._draw_box(p, ox, oy, 0.0, QtGui.QPen(line, 2), fill)
+            p.setPen(line)
+            p.drawText(self.to_px(ox + 0.05, oy - 0.045), name + (f" z {oz:.2f}" if oz > 0.78 else ""))   # the height only for a raised box
         if self.drag is not None and self.drag["item"] == "box":
             gx, gy = self.drag["pos"]
             self._draw_box(p, gx, gy, self.box_yaw, QtGui.QPen(QtGui.QColor(255, 225, 90), 2), QtGui.QColor(255, 225, 90, 90))
@@ -215,7 +226,7 @@ class SceneMap(QtWidgets.QWidget):
                 p.drawLine(self.to_px(rx, ry), self.to_px(gx, gy))
         # hints
         p.setPen(QtGui.QColor(200, 205, 215))
-        p.drawText(8, 16, "drag the box / blue target / table   wheel on the box = turn   right click = menu")
+        p.drawText(8, 16, "drag the blue box / target / table   wheel on the blue box = turn   right click = menu")
         p.drawText(8, 32, "green: a box can stand and be reached here")
         if self.hover is not None:
             p.drawText(8, self.height() - 8, f"x {self.hover[0]:.3f}  y {self.hover[1]:.3f} m")

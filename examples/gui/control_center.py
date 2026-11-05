@@ -377,6 +377,7 @@ class ControlCenter(QtWidgets.QMainWindow):
         self._tick += 1
         if snap["box"] is not None and (snap["box_age"] or 0) < 3.0:
             self.map.set_box_live(snap["box"])
+        self.map.set_other_boxes({c: p for c, p in snap.get("boxes", {}).items() if c != "blue"})
         if self._tick % 4 == 0 and snap["joints"]:
             self._fill_joints(snap["joints"])
 

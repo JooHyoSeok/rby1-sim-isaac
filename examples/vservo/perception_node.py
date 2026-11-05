@@ -1,4 +1,4 @@
-"""Perception for the hybrid grasp, in the ROS 2 container: stereo box pose + palm-camera blobs, sent to the executor.
+"""Perception for the hybrid grasp, in the ROS 2 container: stereo pose of every box + wrist-camera blobs, sent to the executor.
 
   docker cp examples/vservo/{vision.py,perception_node.py} intelligent-robotic-manipulation:/tmp/
   docker cp ~/docker/isaac-sim/data/rby1_gt.json intelligent-robotic-manipulation:/tmp/calib.json   # stereo extrinsics
@@ -8,10 +8,10 @@
 Also publishes debug images for RViz and servo_viewer.py (the executor, hybrid_grasp.py, sends its servo state to udp/5103):
   /rby1/servo_debug/wrist_right   blobs (cyan), predicted landmarks (yellow x), matched pairs (green), the measured box centre
                                   (magenta) and where it must be, on the tool line (red cross), with the error in mm
-  /rby1/servo_debug/stereo_right  blobs and the box pose fitted from the stereo pair, landmarks reprojected
+  /rby1/servo_debug/stereo_right  blobs and the box poses fitted from the stereo pair, landmarks reprojected
 Sends JSON datagrams to 127.0.0.1:5102 at ~10 Hz:
-  {"stamp": sim time [s], "box": {"R": 3x3, "t": [x, y, z], "n": landmarks used, "rms": m} or null,
-   "wrist": [[u, v, area], ...]}   red blobs of the palm camera (right hand)
+  {"stamp": sim time [s], "boxes": {"blue": {"R": 3x3, "t": [x, y, z], "n": landmarks used, "rms": m}, ...},   boxes seen with >= 3 landmarks
+   "wrist": {"blue": [[u, v, area], ...], ...}}   blobs of each box colour in the right hand's camera
 The stereo extrinsics come from rby1_gt.json here (the simulator's ground truth); the real pipeline puts the result of
 the eye-to-hand calibration (HW7) there. The servo stage does not depend on them being exact.
 """
@@ -35,7 +35,7 @@ parser.add_argument("--calib", default="/tmp/calib.json")
 parser.add_argument("--record", default="", metavar="FILE.mp4",
                     help="write the two debug images side by side to this video until the executor reports 'done'")
 parser.add_argument("--bias", type=float, nargs=3, default=[0.0, 0.0, 0.0], metavar=("DX", "DY", "DZ"),
-                    help="add this to the stereo box position [m]: emulates a calibration error")
+                    help="add this to the stereo box positions [m]: emulates a calibration error")
 args = parser.parse_args()
 calib = json.load(open(args.calib))
 T_L, T_R = np.array(calib["stereo"]["stereo_left"]), np.array(calib["stereo"]["stereo_right"])
@@ -94,8 +94,9 @@ def to_msg(img, stamp_src):
 def draw_wrist(img, blobs):
     out = img.copy()  # RGB
     d = dbg["d"] if time.time() - dbg["t"] < 4.0 else {}
-    for u, v, area in blobs:
-        cv2.circle(out, (int(u), int(v)), 9, (0, 255, 255), 1)
+    for color_blobs in blobs.values():
+        for u, v, area in color_blobs:
+            cv2.circle(out, (int(u), int(v)), 9, (0, 255, 255), 1)
     for k, (u, v) in enumerate(d.get("pred", [])):
         cross(out, (u, v), 7, (255, 255, 0), 1)
         cv2.putText(out, f"Q{k + 1}", (int(u) + 8, int(v) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
@@ -114,20 +115,20 @@ def draw_wrist(img, blobs):
     return out
 
 
-def draw_stereo(img, pts, pose):
+def draw_stereo(img, poses):
     out = img.copy()
-    for u, v, area in V.blobs(img):
-        cv2.circle(out, (int(u), int(v)), 9, (0, 255, 255), 1)
-    lines = ["no box pose"]
-    if pose is not None:
-        R, t, rms, n = pose
+    for color in ("red", *V.BOX_COLORS):
+        for u, v, area in V.blobs(img, color=color, max_area=V.LANDMARK_MAX_AREA):
+            cv2.circle(out, (int(u), int(v)), 9, (0, 255, 255), 1)
+    lines = ["no box pose"] if not poses else []
+    for color, (R, t, rms, n) in poses.items():
         px, _ = V.project(T_R, t + V.OBJECT_MODEL @ R.T)
-        for k, (u, v) in enumerate(px):
+        for u, v in px:
             cross(out, (u, v), 6, (255, 255, 0), 1)
-            cv2.putText(out, f"Q{k + 1}", (int(u) + 7, int(v) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1, cv2.LINE_AA)
         c = V.project(T_R, t[None])[0][0]
         cv2.circle(out, (int(c[0]), int(c[1])), 8, (255, 0, 255), 2)
-        lines = [f"stereo box pose from {n} landmarks (fit {rms * 1000:.1f} mm)", f"centre ({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}) m"]
+        cv2.putText(out, color, (int(c[0]) + 10, int(c[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1, cv2.LINE_AA)
+        lines.append(f"{color}: ({t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}) m, {n} landmarks, fit {rms * 1000:.1f} mm")
     text(out, lines)
     return out
 
@@ -151,17 +152,16 @@ def tick():
     if not all(k in latest for k in ("stereo_left", "stereo_right", "wrist_right")):
         return
     stamp = latest["stereo_left"][0]
-    pts = V.stereo_points(latest["stereo_left"][1], latest["stereo_right"][1], T_L, T_R)
-    pose = V.object_pose(pts) if len(pts) >= 3 else None
-    box = None if pose is None else {"R": pose[0].tolist(), "t": (pose[1] + args.bias).tolist(), "rms": pose[2], "n": pose[3]}
-    wrist_blobs = V.blobs(latest["wrist_right"][1])
-    wrist = [list(b) for b in wrist_blobs]
+    poses = V.box_poses(latest["stereo_left"][1], latest["stereo_right"][1], T_L, T_R)
+    boxes = {c: {"R": R.tolist(), "t": (t + args.bias).tolist(), "rms": rms, "n": n} for c, (R, t, rms, n) in poses.items()}
+    wrist_blobs = {c: V.blobs(latest["wrist_right"][1], color=c) for c in V.BOX_COLORS}   # close up the spheres are big: no area limit
+    wrist = {c: [list(b) for b in bl] for c, bl in wrist_blobs.items()}
     stamp_msg = latest["stereo_right"][2]
-    wrist_img, stereo_img = draw_wrist(latest["wrist_right"][1], wrist_blobs), draw_stereo(latest["stereo_right"][1], pts, pose)
+    wrist_img, stereo_img = draw_wrist(latest["wrist_right"][1], wrist_blobs), draw_stereo(latest["stereo_right"][1], poses)
     pub["wrist_right"].publish(to_msg(wrist_img, stamp_msg))
     pub["stereo_right"].publish(to_msg(stereo_img, stamp_msg))
     record(wrist_img, stereo_img)
-    sock.sendto(json.dumps({"stamp": stamp, "box": box, "wrist": wrist}).encode(), ("127.0.0.1", 5102))
+    sock.sendto(json.dumps({"stamp": stamp, "boxes": boxes, "wrist": wrist}).encode(), ("127.0.0.1", 5102))
 
 
 node.create_timer(0.1, tick)

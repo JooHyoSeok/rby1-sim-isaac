@@ -1,8 +1,9 @@
 """Offline checks of the control centre, no simulator and no robot:
   QT_QPA_PLATFORM=offscreen /usr/bin/python3 test_offline.py
-Covers: scene_config reachability, the pure grasp_core helpers, the scene map, the window (buttons -> UDP commands, status -> button
-states, joint table, camera views), and servo_server's command handling with a fake robot (queueing, errors, abort).
-Not covered: anything that talks to the simulator or the robot (grasp_core.GraspRobot, rby1_vision.poll_commands).
+Covers: scene_config reachability and the multi-box helpers, the pure grasp_core helpers, the stack alignment loop and the stack check
+(GraspRobot with a simulated hand, no SDK), the scene map, the window (buttons -> UDP commands, status -> button states, joint table,
+camera views), servo_server's command handling with a fake robot (queueing, errors, abort, reply port) and rbyctl against it.
+Not covered: anything that talks to the simulator or the robot (the rest of grasp_core.GraspRobot, rby1_vision.poll_commands).
 """
 import json
 import os
@@ -18,6 +19,7 @@ import numpy as np  # noqa: E402
 from PyQt5 import QtCore, QtTest, QtWidgets  # noqa: E402
 
 import grasp_core  # noqa: E402
+import rbyctl  # noqa: E402
 import scene_config as C  # noqa: E402
 from control_center import ControlCenter  # noqa: E402
 from scene_map import SceneMap  # noqa: E402
@@ -74,10 +76,37 @@ def test_config():
     assert C.box_reachable(0.64, -0.20, 0.72) and not C.box_reachable(0.64, -0.20, 0.60)
 
 
+def test_boxes():
+    row = {n: (*xy, 0.76) for n, xy in C.BOX_DEFAULTS.items()}
+    assert all(C.check_pose(x, y, 0.72) is None for x, y, _ in row.values())          # the start row is on the table and reachable
+    assert all(C.pick_problem(n, row) is None for n in row)
+    assert C.stack_problems(["green", "blue", "yellow"], row) == []
+    # too close: the open fingers (+-6.3 cm) would hit the neighbour; far: out of reach; unseen / bad orders are refused
+    near = {**row, "yellow": (0.62, -0.30, 0.76)}
+    assert "too close to the yellow box" in C.pick_problem("blue", near)
+    assert "out of reach" in C.pick_problem("blue", {**row, "blue": (0.72, -0.34, 0.76)})
+    assert "cannot see the yellow box" in C.stack_problems(["green", "yellow"], {k: v for k, v in row.items() if k != "yellow"})[0]
+    assert C.stack_problems(["green"], row) and C.stack_problems(["green", "green"], row)
+    # the boxes of a stack are no obstacle for each other; a different height is no obstacle either
+    stack = {"green": (0.62, -0.22, 0.76), "blue": (0.62, -0.22, 0.84), "yellow": (0.62, -0.10, 0.76)}
+    assert C.stacked_on(stack) == {"green": None, "blue": "green", "yellow": None}
+    assert C.pick_problem("blue", stack) is None
+    # a stack whose base is too far away: the model says so before the arm finds out
+    assert "level 2 of the stack" in C.stack_problems(["green", "blue"], {**row, "green": (0.73, -0.22, 0.76)})[0]
+    # free spots: only where nothing is closer than the finger clearance; on the default table there is no room beside the row
+    assert C.direction_spot("right", row, exclude="blue") == (0.62, -0.33)               # the blue box's own spot
+    assert C.direction_spot("right", row) is None
+    pulled = (0.80, 0.0)                                                                  # table pulled closer: room for a move
+    right, left = (C.direction_spot(d, row, exclude="blue", table_center=pulled) for d in ("right", "left"))
+    assert right[1] < left[1] and all(C.check_pose(*p, 0.72, pulled) is None for p in (right, left))
+
+
 def test_helpers():
     assert grasp_core.smoothstep(0) == 0 and grasp_core.smoothstep(1) == 1 and abs(grasp_core.smoothstep(0.5) - 0.5) < 1e-9
     above, down, back = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.28, 0.72)
     assert above[2] >= 0.88 and abs(above[0] - 0.625) < 1e-9 and abs(above[1] + 0.28) < 1e-9
+    top2 = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.22, 0.88)      # on a stack of two: carried above its top
+    assert top2[0][2] >= 0.88 + 0.04 + grasp_core.HOVER - 1e-9 and abs(top2[1][2] - (0.88 + 0.04 + 0.004)) < 1e-9
     assert abs(down[2] - (0.72 + 0.04 + 0.004)) < 1e-9 and np.allclose(back - down, [-0.10, 0, 0])
     low = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.70]), 0.62, -0.28, 0.72)[0]
     assert low[2] >= 0.72 + 0.04 + grasp_core.HOVER - 1e-9              # never carries the box through the table
@@ -169,7 +198,8 @@ class FakeBridge:
                 for n in ("wrist overlay", "stereo overlay", "wrist left", "stereo left")}
         names = [f"torso_{i}" for i in range(6)] + [f"right_arm_{i}" for i in range(7)] + [f"left_arm_{i}" for i in range(7)] + \
                 ["left_wheel", "right_wheel", "head_0", "head_1", "gripper_finger_r1", "gripper_finger_r2"]
-        return {"images": imgs, "joints": {n: 0.1 * i for i, n in enumerate(names)}, "joints_age": 0.1, "box": (0.64, -0.2, 0.76), "box_age": 0.1}
+        return {"images": imgs, "joints": {n: 0.1 * i for i, n in enumerate(names)}, "joints_age": 0.1, "box": (0.64, -0.2, 0.76), "box_age": 0.1,
+                "boxes": {"blue": (0.64, -0.2, 0.76), "green": (0.62, -0.22, 0.76), "yellow": (0.62, -0.10, 0.84)}}
 
     def close(self):
         pass
@@ -188,6 +218,8 @@ def test_window():
     # cameras and joints are filled from the bridge
     assert all(v.pixmap() is not None for v in w.views.values())
     assert w.joints.rowCount() > 0 and w.joints.item(0, 1) is not None
+    assert set(w.map.other_boxes) == {"green", "yellow"}                  # the other boxes are drawn on the map, not draggable
+    assert not w.map.grab().isNull()
     # no executor yet: task buttons disabled
     assert not w.buttons["pick"].isEnabled() and "not connected" in w.status_label.text()
     st = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -297,16 +329,34 @@ def test_window():
 # ---- the executor service with a fake robot -----------------------------------------------------------------------------
 class FakeRobot:
     def __init__(self):
-        self.calls, self.flag = [], threading.Event()
+        self.calls, self.flag, self.jobs = [], threading.Event(), 0
+        self.row = {n: {"pos": [*xy, 0.76], "yaw_deg": 0.0, "landmarks": 4, "on": None} for n, xy in C.BOX_DEFAULTS.items()}
 
     def status(self):
-        return {"phase": "idle", "holding": False, "seeded": True, "tip": [0.5, -0.2, 0.8], "closeness": 0.0}
+        return {"phase": "idle", "holding": False, "held": None, "seeded": True, "tip": [0.5, -0.2, 0.8], "closeness": 0.0}
+
+    def scene(self):
+        return {"boxes": self.row, "robot": self.status(), "table": {"center": list(C.TABLE_CENTER), "size": list(C.TABLE_SIZE),
+                                                                      "top": C.TABLE_TOP, "assumed": True}}
+
+    def job(self):
+        self.jobs += 1
+        import contextlib
+        return contextlib.nullcontext()
 
     def abort(self):
         self.flag.set()
 
-    def pick(self, use_image=True, bias=(0, 0, 0)):
-        self.calls.append(("pick", use_image, bias))
+    def place_on(self, base):
+        self.calls.append(("place_on", base))
+
+    def stack(self, order):
+        self.calls.append(("stack", tuple(order)))
+        if "yellow" not in order:
+            raise grasp_core.TaskError("cannot see the yellow box")
+
+    def pick(self, color="blue", use_image=True, bias=(0, 0, 0)):
+        self.calls.append(("pick", color, use_image, bias))
         if use_image == "wait":
             self.flag.clear()
             while not self.flag.is_set():
@@ -336,7 +386,8 @@ def test_server():
     try:
         srv.handle({"cmd": "pick_place", "x": 0.6, "y": -0.3, "top": 0.72})
         time.sleep(0.4)
-        assert robot.calls == [("pick", True, (0.0, 0.0, 0.0)), ("place", 0.6, -0.3, 0.72)], robot.calls
+        assert robot.calls == [("pick", "blue", True, (0.0, 0.0, 0.0)), ("place", 0.6, -0.3, 0.72)], robot.calls
+        assert robot.jobs == 1                                                        # pick and place ran as one job
         # an error is reported, not raised
         srv.handle({"cmd": "pick", "use_image": "fail"})
         time.sleep(0.4)
@@ -361,8 +412,167 @@ def test_server():
         srv.stop.set()
 
 
+# ---- the stack alignment and check, on a GraspRobot whose hand is simulated (no SDK) -------------------------------------------
+class SimPerception:
+    """Stereo measurements of the base box and of the held box from the simulated hand, a few mm noisy."""
+
+    def __init__(self, robot, base, base_xy, grip, visible=True):
+        self.robot, self.base, self.base_xy, self.grip, self.visible = robot, base, np.array(base_xy), np.array(grip), visible
+        self.rng = np.random.default_rng(3)
+
+    def held_true(self):
+        return self.robot.hand[:2] - np.array([C.TIP_BEYOND_CENTRE, 0.0]) + self.grip     # the box sits off-centre between the fingers
+
+    def boxes(self, max_age=1.5):
+        noise = lambda: self.rng.normal(0, 0.002, 2)  # noqa: E731
+        out = {self.base: {"t": [*(self.base_xy + noise()), 0.80], "n": 3}}
+        if self.visible:
+            out[self.robot.held] = {"t": [*(self.held_true() + noise()), 0.98], "n": 3}
+        return out
+
+
+def sim_robot(bias, grip, visible, start=(0.625, -0.235)):
+    """GraspRobot holding the blue box over a hand that follows the commanded tip with a lag and a constant offset `bias` (what the
+    position loop leaves), as grasp_core._align_over sees it: ee_pose / _stream_to / _tick / perception are the simulated ones."""
+    r = object.__new__(grasp_core.GraspRobot)
+    r.held, r.holding, r.phase, r._depth, r.abort_flag = "blue", True, "idle", 0, threading.Event()
+    r.events = []
+    r.event, r.debug, r._check = r.events.append, (lambda **kw: None), (lambda: None)
+    r.hand, r.target = np.array([*start, 0.98]), np.array([*start, 0.98])
+    r.cmd_tip = r.hand.copy()
+
+    def ee_pose():
+        T = np.eye(4)
+        T[:3, :3] = grasp_core.R_FRONT
+        T[:3, 3] = r.hand - grasp_core.TOOL * np.array([1.0, 0.0, 0.0])
+        return T
+
+    def tick(t_loop):
+        r.hand += (r.target + np.r_[bias, 0.0] - r.hand) * (1 - np.exp(-1.0 / grasp_core.RATE / 0.15))   # first-order lag, 0.15 s
+    r.ee_pose, r._stream_to, r._tick = ee_pose, (lambda tip: r.target.__setitem__(slice(None), tip)), tick
+    r.perception = SimPerception(r, "green", (0.62, -0.22), grip, visible)
+    return r
+
+
+def test_align():
+    bias, grip = (0.008, -0.006), (0.004, -0.003)
+    r = sim_robot(bias, grip, visible=True)
+    r._align_over("green")                                                  # the position loop is 1 cm off, the grip 5 mm: both vanish
+    err = np.linalg.norm(r.perception.held_true() - r.perception.base_xy)
+    assert err < 0.003 and "aligned over the green box" in r.events[-1] and "(stereo)" in r.events[-1], (err, r.events)
+    # the held box hidden by the fingers: the hand's own pose is used (the position loop's error is still removed, the grip offset is not)
+    r = sim_robot(bias, grip, visible=False)
+    r._align_over("green")
+    err = np.linalg.norm(r.perception.held_true() - r.perception.base_xy)
+    assert err < np.linalg.norm(grip) + 0.003 and "(hand)" in r.events[-1], (err, r.events)
+    assert err > 0.003                                                      # ... which is why the stereo measurement is the primary one
+    # the base box not visible: refuses instead of placing blindly
+    r = sim_robot(bias, grip, visible=True)
+    r.perception.boxes = lambda max_age=1.5: {}
+    old, grasp_core.ALIGN_TIMEOUT = grasp_core.ALIGN_TIMEOUT, 0.2
+    try:
+        r._align_over("green")
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "not visible" in str(exc)
+    finally:
+        grasp_core.ALIGN_TIMEOUT = old
+
+
+def test_verify_and_stack():
+    r = object.__new__(grasp_core.GraspRobot)
+    r.events, r.abort_flag, r._depth, r.phase = [], threading.Event(), 0, "idle"
+    r.event = r.events.append
+
+    class P:
+        pos = {}
+
+        def wait_box(self, color, count=6, timeout=8.0, abort=None):
+            return [{"boxes": {color: {"t": self.pos[color]}}}] if color in self.pos else []
+
+        def boxes(self, max_age=1.5):
+            return {c: {"t": t} for c, t in self.pos.items()}
+    r.perception = P()
+    P.pos = {"green": [0.620, -0.220, 0.80], "blue": [0.623, -0.218, 0.88]}
+    r._verify_stacked("blue", "green")
+    assert "offset (+3.0, +2.0) mm" in r.events[-1] and "height above it 80 mm" in r.events[-1], r.events
+    P.pos = {"green": [0.620, -0.220, 0.80], "blue": [0.650, -0.220, 0.80]}           # the box slid off and stands next to it
+    try:
+        r._verify_stacked("blue", "green")
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "did not stay on the green box" in str(exc)
+    P.pos = {"green": [0.620, -0.220, 0.80]}
+    r._verify_stacked("blue", "green")                                               # blue not visible: says so, does not fail
+    assert "could not check" in r.events[-1]
+    # stack: the plan is checked against the scene first; then pick + place_on per box, bottom first
+    calls = []
+    r.pick, r.place_on = (lambda c, **kw: calls.append(("pick", c))), (lambda b: calls.append(("place_on", b)))
+    P.pos = {n: [*xy, 0.76] for n, xy in C.BOX_DEFAULTS.items()}
+    r.stack(["green", "blue", "yellow"])
+    assert calls == [("pick", "blue"), ("place_on", "green"), ("pick", "yellow"), ("place_on", "blue")], calls
+    calls.clear()
+    P.pos = {"green": [0.62, -0.22, 0.76]}
+    try:
+        r.stack(["green", "blue"])
+        raise AssertionError("expected a TaskError")
+    except grasp_core.TaskError as exc:
+        assert "cannot see the blue box" in str(exc) and calls == []                 # nothing moved
+    # abort requested between two tasks of one job is not lost: only the outermost run clears the flag
+    r.abort_flag.clear()
+    with r.job():
+        r.abort_flag.set()
+        r._run("inner", lambda: None)
+    assert r.abort_flag.is_set()
+
+
+# ---- rbyctl against the server with the fake robot -----------------------------------------------------------------------------
+def test_rbyctl():
+    import contextlib
+    import io
+    p_cmd, p_status = free_port(), free_port()
+    robot = FakeRobot()
+    srv = Server(robot, cmd_port=p_cmd, status_addr=("127.0.0.1", p_status))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    old, C.PORT_EXEC_CMD = C.PORT_EXEC_CMD, p_cmd
+
+    def run(*argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = rbyctl.main(list(argv))
+        return rc, out.getvalue()
+    try:
+        rc, out = run("stack", "green", "blue", "yellow")
+        assert rc == 0 and out.strip().endswith("OK") and "done: stack" in out, (rc, out)
+        assert robot.calls[-1] == ("stack", ("green", "blue", "yellow"))
+        rc, out = run("stack", "green", "blue")                                      # the fake robot refuses this one
+        assert rc == 1 and "FAILED: failed: stack: cannot see the yellow box" in out, (rc, out)
+        rc, out = run("pick", "yellow")
+        assert rc == 0 and robot.calls[-1] == ("pick", "yellow", True, (0.0, 0.0, 0.0))
+        rc, out = run("place-on", "green")
+        assert rc == 0 and robot.calls[-1] == ("place_on", "green")
+        rc, out = run("move", "blue", "0.6", "-0.3")
+        assert rc == 0 and robot.calls[-2:] == [("pick", "blue", True, (0.0, 0.0, 0.0)), ("place", 0.6, -0.3, C.TABLE_TOP)], robot.calls
+        rc, out = run("move", "blue", "right")                                       # the default table has no free spot beside the row
+        assert rc == 0 or "no free reachable spot" in out
+        rc, out = run("scene")
+        scene = json.loads(out)
+        assert rc == 0 and set(scene["boxes"]) == set(C.BOX_NAMES) and scene["unseen"] == [] and "free_spots" in scene
+        assert scene["robot"]["holding"] is False and scene["table"]["assumed"] is True
+        # a busy executor refuses at once, with the reason
+        robot.row, srv.task = {}, "pick"
+        rc, out = run("home")
+        assert rc == 1 and "busy with 'pick'" in out, (rc, out)
+        srv.task = None
+        rc, out = run("scene")
+        assert json.loads(out)["unseen"] == list(C.BOX_NAMES)                        # nothing seen: says which boxes are missing
+    finally:
+        C.PORT_EXEC_CMD = old
+        srv.stop.set()
+
+
 if __name__ == "__main__":
-    tests = [test_config, test_helpers, test_map, test_window, test_server]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

@@ -14,7 +14,9 @@ TABLE_CENTER = (0.88, 0.0)
 TABLE_SIZE = (0.6, 0.8)   # x, y extent [m]
 TABLE_TOP = 0.72
 BOX_SIZE = (0.05, 0.05, 0.08)
-BOX_DEFAULT = (0.64, -0.20)
+BOX_NAMES = ("blue", "green", "yellow")
+BOX_DEFAULTS = {"blue": (0.62, -0.34), "green": (0.62, -0.22), "yellow": (0.62, -0.10)}   # a row, 12 cm apart
+BOX_DEFAULT = BOX_DEFAULTS["blue"]
 
 # Reachability. The grasp posture (torso squat) puts the right shoulder at SHOULDER; the tool points forward, so the wrist
 # link sits TIP_TO_WRIST behind the fingertips. Measured: the box at (0.64, -0.20) on the 0.72 m table (wrist 0.494 m from
@@ -72,3 +74,79 @@ def table_front_edge(table_center=TABLE_CENTER, table_size=TABLE_SIZE):
 
 def table_ok_before_seed(table_center=TABLE_CENTER, table_size=TABLE_SIZE) -> bool:
     return table_front_edge(table_center, table_size) >= SEED_EDGE_X
+
+
+# ---- several boxes: clearance, stacks, free spots ------------------------------------------------------------------------------
+# The fingers open sideways (y) to +-0.063 m around the box centre: a box at the same height closer than this in y (or in x, the
+# fingers are 3 cm wide in x ... and the hand comes from the front) would be hit when the hand goes down around the box.
+FINGER_CLEARANCE = 0.11   # [m] minimum centre distance to the next box at the same level
+STACK_XY = 0.035          # [m] a box whose centre is this close (in x and y) to another one, one box height above it, sits on it
+SPOT_MARGIN = 0.01        # [m] free spots stay this far inside the reach limit
+HOVER_STACK = 0.06        # [m] same as grasp_core.HOVER: the held box's bottom this far above the surface it is carried over
+
+
+def stacked_on(boxes):
+    """{name: name of the box it rests on, or None} for {name: (x, y, z)} box centres."""
+    out = {}
+    for n, (x, y, z) in boxes.items():
+        out[n] = None
+        for m, (bx, by, bz) in boxes.items():
+            if m != n and abs(x - bx) < STACK_XY and abs(y - by) < STACK_XY and abs((z - bz) - BOX_SIZE[2]) < 0.025:
+                out[n] = m
+    return out
+
+
+def pick_problem(name, boxes):
+    """None when box `name` can be picked where it is ({name: (x, y, z)}), else the reason: out of reach, or a neighbour at the
+    same level that the open fingers would hit."""
+    x, y, z = boxes[name]
+    tip = (x + TIP_BEYOND_CENTRE, y, z)
+    d = wrist_distance(tip)
+    if d > MAX_REACH:
+        return f"the {name} box at ({x:.2f}, {y:.2f}) is out of reach ({d:.2f} m from the shoulder, limit {MAX_REACH:.2f})"
+    if d < MIN_REACH:
+        return f"the {name} box at ({x:.2f}, {y:.2f}) is too close to the body ({d:.2f} m, limit {MIN_REACH:.2f})"
+    for m, (bx, by, bz) in boxes.items():
+        if m != name and abs(bz - z) < 0.5 * BOX_SIZE[2] and math.hypot(bx - x, by - y) < FINGER_CLEARANCE:
+            return (f"the {name} box is too close to the {m} box ({math.hypot(bx - x, by - y) * 100:.0f} cm apart, the open fingers need "
+                    f"{FINGER_CLEARANCE * 100:.0f} cm): move one of them first")
+    return None
+
+
+def stack_problems(order, boxes, top=TABLE_TOP):
+    """Reasons why `order` (box names, bottom first; the first one stays where it is) cannot be stacked from the current
+    scene {name: (x, y, z)}. Empty list: go."""
+    missing = [n for n in order if n not in boxes]
+    if missing:
+        return [f"cannot see the {', '.join(missing)} box" + ("es" if len(missing) > 1 else "")]
+    if len(set(order)) != len(order) or len(order) < 2:
+        return ["a stack needs two or more different boxes"]
+    bx, by, _ = boxes[order[0]]
+    problems = []
+    for k, n in enumerate(order[1:], 1):
+        p = pick_problem(n, {m: boxes[m] for m in boxes if m not in order[:k]})   # boxes already on the stack are out of the way
+        if p:
+            problems.append(p)
+        hover = (bx + TIP_BEYOND_CENTRE, by, top + k * BOX_SIZE[2] + BOX_SIZE[2] / 2 + HOVER_STACK)
+        if not tip_reachable(hover):
+            problems.append(f"level {k + 1} of the stack at ({bx:.2f}, {by:.2f}) is out of reach "
+                            f"({wrist_distance(hover):.2f} m from the shoulder)")
+    return problems
+
+
+def direction_spot(direction, boxes, exclude=None, top=TABLE_TOP, table_center=TABLE_CENTER, table_size=TABLE_SIZE):
+    """Free table spot that is furthest 'right' (-y, the right arm's side), 'left' (+y), 'near' (-x) or 'far' (+x), or the one
+    closest to the shoulder line ('center'): reachable with a margin, on the table, FINGER_CLEARANCE from every box but `exclude`."""
+    others = [(x, y) for n, (x, y, _) in boxes.items() if n != exclude]
+    best = None
+    for i in range(int(table_size[0] / 0.01) + 1):
+        for j in range(int(table_size[1] / 0.01) + 1):
+            x, y = table_center[0] - table_size[0] / 2 + i * 0.01, table_center[1] - table_size[1] / 2 + j * 0.01
+            if check_pose(x, y, top, table_center, table_size) is not None or wrist_distance(box_tip(x, y, top)) > MAX_REACH - SPOT_MARGIN:
+                continue
+            if any(math.hypot(x - ox, y - oy) < FINGER_CLEARANCE for ox, oy in others):
+                continue
+            key = {"right": y, "left": -y, "near": x, "far": -x, "center": abs(y - SHOULDER[1]) + 0.2 * abs(x - 0.60)}[direction]
+            if best is None or key < best[0]:
+                best = (key, (round(x, 3), round(y, 3)))
+    return None if best is None else best[1]

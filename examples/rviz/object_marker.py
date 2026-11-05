@@ -1,7 +1,7 @@
 """Show the table and the box in RViz (the URDF only has the robot): /rby1/scene_markers in frame "world".
 
-The box follows /rby1/gt/tf (frame RBY1 -> Object, the simulator's ground truth); the table is fixed. Sizes and the table
-pose duplicate src/rby1_vision.py (OBJECT_SIZE, TABLE_*). Run next to RViz with the sim started with --vision:
+The boxes follow /rby1/gt/tf (frames RBY1 -> Box_blue, Box_green, Box_yellow, the simulator's ground truth); the table is fixed. Sizes
+and the table pose duplicate src/rby1_vision.py (OBJECT_SIZE, TABLE_*). Run next to RViz with the sim started with --vision:
   /usr/bin/python3 object_marker.py   (ROS 2 python; a venv python3 lacks yaml)
 """
 import rclpy
@@ -26,17 +26,19 @@ def cube(ns, size, rgba, pos):
 rclpy.init()
 node = Node("scene_markers")
 pub = node.create_publisher(MarkerArray, "/rby1/scene_markers", 10)
-box = cube("box", OBJECT_SIZE, (0.9, 0.5, 0.1, 1.0), (0.64, -0.2, 0.76))
+COLORS = {"blue": (0.2, 0.3, 1.0, 1.0), "green": (0.2, 0.9, 0.2, 1.0), "yellow": (1.0, 0.9, 0.1, 1.0)}
+boxes = {name: cube(f"box_{name}", OBJECT_SIZE, rgba, (0.62, -0.22, 0.76)) for name, rgba in COLORS.items()}
 table = cube("table", TABLE_SIZE, (0.7, 0.6, 0.5, 0.8), TABLE_CENTER)
 
 
 def on_tf(msg):
     for t in msg.transforms:
-        if t.child_frame_id == "Object":
+        if t.child_frame_id.startswith("Box_") and t.child_frame_id[4:] in boxes:
             p, q = t.transform.translation, t.transform.rotation
+            box = boxes[t.child_frame_id[4:]]
             box.pose.position.x, box.pose.position.y, box.pose.position.z = p.x, p.y, p.z
             box.pose.orientation = q
-    pub.publish(MarkerArray(markers=[box, table]))
+    pub.publish(MarkerArray(markers=[*boxes.values(), table]))
 
 
 node.create_subscription(TFMessage, "/rby1/gt/tf", on_tf, 10)

@@ -16,7 +16,8 @@ The sim must run with docker/run_sdk.sh ... --gripper --gripper-name rb_gripper 
          re-based on the measured pose, so the position loop's steady-state offset is driven out (integral action)
        - the target goes to the robot as a command *stream* (whole-body Cartesian, torso + arms), so the motion is continuous
   4. close the gripper, then lift along a smooth ramp, also streamed.
---no-servo uses the stereo measurement only (the same controller), for comparison. Tip positions are in the base frame (= world).
+--no-servo uses the stereo measurement only (the same controller), for comparison. --color picks another box (default blue).
+Tip positions are in the base frame (= world).
 """
 import argparse
 import collections
@@ -37,6 +38,7 @@ from sim_gripper_bridge import SimDynamixelBus  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--no-servo", action="store_true", help="stereo measurement only (position-based), for comparison")
+parser.add_argument("--color", default="blue", choices=("blue", "green", "yellow"), help="the box to pick")
 args = parser.parse_args()
 
 TOOL = 0.12          # fingertips lie this far beyond the ee frame along the tool axis (-z_ee)
@@ -157,11 +159,11 @@ body = rby.BodyComponentBasedCommandBuilder().set_right_arm_command(
 print("ready:", joint_move(body), flush=True)
 
 # 2. first stereo estimate of the box (landmark association, orientation, fallback measurement)
-est = [m for m in wait_messages(6) if m["box"] and m["box"]["n"] >= 3]
-assert est, "no box pose from the stereo rig (is perception_node.py running? are 3 landmarks visible?)"
-box_R = np.array(est[-1]["box"]["R"])
-box_t = np.mean([m["box"]["t"] for m in est], axis=0)
-print(f"stereo box estimate {np.round(box_t, 3)} ({est[-1]['box']['n']} landmarks)", flush=True)
+est = [m for m in wait_messages(6) if m["boxes"].get(args.color, {}).get("n", 0) >= 3]
+assert est, f"no {args.color} box pose from the stereo rig (is perception_node.py running? are 3 landmarks visible?)"
+box_R = np.array(est[-1]["boxes"][args.color]["R"])
+box_t = np.mean([m["boxes"][args.color]["t"] for m in est], axis=0)
+print(f"stereo {args.color} box estimate {np.round(box_t, 3)} ({est[-1]['boxes'][args.color]['n']} landmarks)", flush=True)
 
 # 3. continuous servo
 hist = collections.deque(maxlen=int(3 * RATE))  # (time, ee pose): the hand pose at the instant of a camera image
@@ -184,7 +186,7 @@ while time.time() - t_start < TIMEOUT:
         last_n, data = msg["n"], msg["data"]
         if not args.no_servo:
             T_then = pose_at(msg["t"] - LATENCY)
-            blobs = np.array(data["wrist"]) if data["wrist"] else np.zeros((0, 3))
+            blobs = np.array(data["wrist"].get(args.color) or np.zeros((0, 3)))
             centre, Z, n_seen = servo.box_in_ee(blobs, servo.cam_pose(T_then), box_R, box_t)
             if centre is not None and n_seen >= 2:
                 c_world, src = (T_then @ np.r_[centre, 1])[:3], "image"
@@ -194,8 +196,8 @@ while time.time() - t_start < TIMEOUT:
                             matched=[[k, float(p[0]), float(p[1])] for k, p in servo.match_landmarks(blobs, pred)],
                             centre_px=px_of((to_cam @ np.r_[centre, 1])[:3]).tolist(),
                             goal_px=px_of((to_cam @ np.r_[0.0, 0.0, centre[2], 1])[:3]).tolist(), depth_cm=Z * 100)
-        if (c_world is None or args.no_servo) and data["box"]:   # no usable image (yet): the stereo measurement
-            c_world, src = np.array(data["box"]["t"]), "stereo"
+        if (c_world is None or args.no_servo) and args.color in data["boxes"]:   # no usable image (yet): the stereo measurement
+            c_world, src = np.array(data["boxes"][args.color]["t"]), "stereo"
     if c_world is not None:
         c_now = (np.linalg.inv(T_ee) @ np.r_[c_world, 1])[:3]  # box centre in the hand frame now
         lat, remaining = c_now[:2], -c_now[2] - (TOOL - TIP_BEYOND)
