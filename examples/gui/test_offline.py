@@ -792,6 +792,7 @@ def test_unstack():
 
         def wait_box(self, color, count=6, timeout=8.0, abort=None):
             return [{"boxes": {color: {"t": list(pos[color])}}}]
+    r.base_pose = lambda: (0.0, 0.0, 0.0)                                  # the base stands at its start pose
     r.perception = P()
     r.pick = lambda c, **kw: moved.append(("pick", c))
     r.place = lambda x, y, top=C.TABLE_TOP: (moved.append(("place", round(x, 2), round(y, 2))), pos.__setitem__(moved[-2][1], (x, y, 0.76)))
