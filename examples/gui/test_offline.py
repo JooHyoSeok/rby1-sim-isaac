@@ -52,6 +52,13 @@ def recv_all(sock, wait=0.3):
     return out
 
 
+def last_msg(sock, window, wait=0.3):
+    """The last datagram received, or a failure that shows the window's log (it says why nothing was sent)."""
+    msgs = recv_all(sock, wait)
+    assert msgs, "nothing was sent; the window's log says:\n" + window.log.toPlainText()[-600:]
+    return msgs[-1]
+
+
 def pump(ms=150):
     QtTest.QTest.qWait(ms)
 
@@ -77,6 +84,19 @@ def test_helpers():
 
 
 # ---- the map ------------------------------------------------------------------------------------------------------------
+def press_drag_release(w, a, b, steps=6):
+    """Left mouse drag on a widget from pixel a to pixel b. The moves are delivered straight to the widget: QTest.mouseMove does not
+    reach it on the offscreen platform."""
+    from PyQt5 import QtGui
+    QtTest.QTest.mousePress(w, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(a.x()), int(a.y())))
+    for i in range(1, steps + 1):
+        q = a + (b - a) * (i / steps)
+        w.mouseMoveEvent(QtGui.QMouseEvent(QtCore.QEvent.MouseMove, QtCore.QPointF(q), QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
+                                           QtCore.Qt.NoModifier))
+        QtTest.QTest.qWait(8)
+    QtTest.QTest.mouseRelease(w, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(b.x()), int(b.y())))
+
+
 def test_map():
     m = SceneMap()
     m.resize(400, 460)
@@ -85,23 +105,59 @@ def test_map():
         px = m.to_px(x, y)
         wx, wy = m.to_world(px.x(), px.y())
         assert abs(wx - x) < 1e-6 and abs(wy - y) < 1e-6
-    got = []
-    m.placed.connect(lambda mode, x, y: got.append((mode, x, y)))
-    target = m.to_px(0.63, -0.18)
-    QtTest.QTest.mousePress(m, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(target.x()), int(target.y())))
-    QtTest.QTest.mouseRelease(m, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(target.x()), int(target.y())))
-    assert len(got) == 1 and got[0][0] == "box" and abs(got[0][1] - 0.63) < 0.01 and abs(got[0][2] + 0.18) < 0.01
-    m.set_mode("table")
-    QtTest.QTest.mousePress(m, QtCore.Qt.LeftButton, pos=QtCore.QPoint(100, 100))
-    QtTest.QTest.mouseMove(m, QtCore.QPoint(120, 140))
-    QtTest.QTest.mouseRelease(m, QtCore.Qt.LeftButton, pos=QtCore.QPoint(120, 140))
-    assert got[-1][0] == "table"
     default = len(m.reach_cells())
     assert default > 0                                                  # a green region exists for the default table (a narrow one)
-    m.set_table((0.80, 0.0), C.TABLE_SIZE, C.TABLE_TOP)
-    assert len(m.reach_cells()) > 2 * default                           # and a table pulled closer opens up many more positions
-    img = m.grab()
-    assert not img.isNull()
+    m.set_box_live((0.64, -0.2, 0.76))
+    m.set_target((0.64, -0.3))
+    events = []
+    m.dragged.connect(lambda item, x, y, final: events.append((item, x, y, final)))
+    # dragging the box: the grabbed point stays under the pointer, the last event is final and the box ends where it was dropped
+    press_drag_release(m, m.to_px(0.64, -0.2), m.to_px(0.64, -0.26))
+    item, x, y, final = events[-1]
+    assert item == "box" and final and abs(x - 0.64) < 0.01 and abs(y + 0.26) < 0.01, events[-1]
+    # dropped where the arm cannot reach (beside the robot): it snaps to the nearest valid position
+    events.clear()
+    press_drag_release(m, m.to_px(0.64, -0.2), m.to_px(0.30, 0.20))
+    item, x, y, final = events[-1]
+    assert item == "box" and final and m.valid(x, y), events[-1]
+    assert abs(x - 0.30) > 0.2                                          # it did move away from the pointer
+    # with "allow" it does not snap
+    events.clear()
+    m.set_allow_any(True)
+    press_drag_release(m, m.to_px(0.64, -0.2), m.to_px(0.30, 0.20))
+    assert abs(events[-1][1] - 0.30) < 0.01 and abs(events[-1][2] - 0.20) < 0.01
+    m.set_allow_any(False)
+    # the place target drags too, and grabbing it does not grab the box
+    events.clear()
+    press_drag_release(m, m.to_px(0.64, -0.3), m.to_px(0.63, -0.33))
+    assert events[-1][0] == "target" and events[-1][3]
+    # the table: grabbed away from the box and the target; kept clear of the seed motion when a minimum edge is set
+    events.clear()
+    m.set_table_min_edge(C.SEED_EDGE_X)
+    press_drag_release(m, m.to_px(1.05, 0.3), m.to_px(0.60, 0.3))
+    item, x, y, final = events[-1]
+    assert item == "table" and final and x >= C.SEED_EDGE_X + C.TABLE_SIZE[0] / 2 - 1e-9, events[-1]
+    m.set_table_min_edge(None)
+    events.clear()
+    press_drag_release(m, m.to_px(1.05, 0.3), m.to_px(0.60, 0.3))
+    assert events[-1][1] < C.SEED_EDGE_X + C.TABLE_SIZE[0] / 2
+    # an empty spot is not a drag target; the wheel over the box turns it, elsewhere it does nothing
+    events.clear()
+    press_drag_release(m, m.to_px(0.2, 0.4), m.to_px(0.3, 0.4))
+    assert events == []
+    turned = []
+    m.rotated.connect(turned.append)
+    from PyQt5 import QtGui
+
+    def wheel(at, delta):
+        ev = QtGui.QWheelEvent(QtCore.QPointF(at), QtCore.QPointF(m.mapToGlobal(at)), QtCore.QPoint(), QtCore.QPoint(0, delta),
+                               QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False)
+        m.wheelEvent(ev)
+    p_box = m.to_px(0.64, -0.2).toPoint()
+    wheel(p_box, 120)
+    wheel(m.to_px(0.2, 0.4).toPoint(), 120)
+    assert turned == [5.0], turned
+    assert not m.grab().isNull()
     m.close()
 
 
@@ -125,6 +181,10 @@ def test_window():
     w = ControlCenter(FakeBridge(), ("127.0.0.1", p_scene), ("127.0.0.1", p_exec), p_status)
     w.show()
     pump(300)
+    # the exact numbers are folded away until asked for (an unchecked group box also disables what is inside it)
+    precise = [g for g in w.findChildren(QtWidgets.QGroupBox) if g.title().startswith("exact values")][0]
+    assert precise.isCheckable() and not precise.isChecked()
+    precise.setChecked(True)
     # cameras and joints are filled from the bridge
     assert all(v.pixmap() is not None for v in w.views.values())
     assert w.joints.rowCount() > 0 and w.joints.item(0, 1) is not None
@@ -171,7 +231,7 @@ def test_window():
     w.box_y.setValue(-0.18)
     w.box_yaw.setValue(10)
     [b for b in w.findChildren(QtWidgets.QPushButton) if b.text() == "apply box"][0].click()
-    assert recv_all(scene_rx)[-1] == {"cmd": "set_box", "x": 0.63, "y": -0.18, "yaw_deg": 10.0}
+    assert last_msg(scene_rx, w) == {"cmd": "set_box", "x": 0.63, "y": -0.18, "yaw_deg": 10.0}
     w.box_x.setValue(0.95)
     [b for b in w.findChildren(QtWidgets.QPushButton) if b.text() == "apply box"][0].click()
     assert recv_all(scene_rx) == []
@@ -194,11 +254,37 @@ def test_window():
     status(seeded=True)
     w.buttons["pick"].click()
     assert recv_all(exec_rx)[-1]["cmd"] == "pick"
-    # clicks on the map are applied
-    px = w.map.to_px(0.60, -0.15)
-    QtTest.QTest.mousePress(w.map, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(px.x()), int(px.y())))
-    QtTest.QTest.mouseRelease(w.map, QtCore.Qt.LeftButton, pos=QtCore.QPoint(int(px.x()), int(px.y())))
+    # dragging the box on the map moves it in the simulator (live and once more on release) and keeps the numbers in step
+    w.allow_any.setChecked(False)
+    w.map.set_table(C.TABLE_CENTER, C.TABLE_SIZE, C.TABLE_TOP)         # back to the default table for the map tests
+    w.tab_x.setValue(C.TABLE_CENTER[0])
+    w.box_yaw.setValue(0)
+    pump(150)
+    recv_all(scene_rx, 0.05)
+    press_drag_release(w.map, w.map.to_px(0.64, -0.2), w.map.to_px(0.64, -0.25))
+    msgs = [m for m in recv_all(scene_rx) if m["cmd"] == "set_box"]
+    assert msgs and abs(msgs[-1]["y"] + 0.25) < 0.01 and abs(w.box_y.value() + 0.25) < 0.01, msgs
+    # the table carries the box along; a box in the hand stays out of it
+    w.map.set_table_min_edge(None)
+    press_drag_release(w.map, w.map.to_px(1.05, 0.3), w.map.to_px(1.05, 0.2))
+    msgs = recv_all(scene_rx)
+    cmds = [m["cmd"] for m in msgs]
+    assert "set_table" in cmds and cmds[-1] == "set_box", cmds
+    table_msg = [m for m in msgs if m["cmd"] == "set_table"][-1]
+    assert abs(table_msg["y"] - 0.0 + 0.1) < 0.02, table_msg            # moved by about -0.1 in y
+    assert abs(msgs[-1]["y"] - (-0.25 - 0.1)) < 0.03, msgs[-1]         # the box moved with it
+    # the wheel over the box turns it (5 degrees per notch)
+    from PyQt5 import QtGui
+    bp = w.map.to_px(*w.map._box_pos()).toPoint()   # where the map shows the box (the fake bridge keeps the live box fixed)
+    w.map.wheelEvent(QtGui.QWheelEvent(QtCore.QPointF(bp), QtCore.QPointF(w.map.mapToGlobal(bp)), QtCore.QPoint(), QtCore.QPoint(0, 120),
+                                       QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False))
+    assert recv_all(scene_rx)[-1]["yaw_deg"] == 5.0
+    # the right-click menu choices: the target is only a GUI thing (no simulator message), the box goes to the simulator
+    w._on_chosen("target", 0.63, -0.18)
+    assert recv_all(scene_rx) == [] and "0.630" in w.target_label.text() and w.map.target == (0.63, -0.18)
+    w._on_chosen("box", 0.64, -0.21)
     assert recv_all(scene_rx)[-1]["cmd"] == "set_box"
+    assert w.map.target is not None                                     # the place target exists from the start
     # log lines from the executor appear
     st.sendto(json.dumps({"type": "log", "text": "hello from the executor"}).encode(), ("127.0.0.1", p_status))
     pump(250)

@@ -77,6 +77,7 @@ class ControlCenter(QtWidgets.QMainWindow):
         self.resize(1500, 980)
         self._joint_names, self._tick = [], 0
         self._build()
+        self._set_target(0.64, -0.30, final=False)  # visible and draggable from the start
         self.fast = QtCore.QTimer(self, interval=66, timeout=self._refresh)
         self.fast.start()
         self.slow = QtCore.QTimer(self, interval=100, timeout=self._poll_status)
@@ -106,47 +107,55 @@ class ControlCenter(QtWidgets.QMainWindow):
         # right: map, scene, tasks, robot
         right = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(right)
-        modes = QtWidgets.QHBoxLayout()
-        self.mode_buttons = {}
-        for key, text in (("box", "click = move box"), ("target", "click = place target"), ("table", "drag = move table")):
-            b = QtWidgets.QRadioButton(text)
-            b.toggled.connect(lambda on, key=key: on and self.map.set_mode(key))
-            modes.addWidget(b)
-            self.mode_buttons[key] = b
-        rv.addLayout(modes)
         self.map = SceneMap()
-        self.map.placed.connect(self._on_map)
-        rv.addWidget(self.map, 4)
-        self.mode_buttons["box"].setChecked(True)  # after the map exists: the toggle handler uses it
+        self.map.dragged.connect(self._on_dragged)
+        self.map.chosen.connect(self._on_chosen)
+        self.map.rotated.connect(self._on_rotated)
+        rv.addWidget(self.map, 8)
 
         scene = QtWidgets.QGroupBox("scene (simulator)")
-        sg = QtWidgets.QGridLayout(scene)
+        sv = QtWidgets.QVBoxLayout(scene)
+        row = QtWidgets.QHBoxLayout()
+        reset = QtWidgets.QPushButton("reset scene")
+        reset.clicked.connect(self.reset_scene)
+        row.addWidget(reset)
+        self.allow_any = QtWidgets.QCheckBox("allow positions the arm cannot reach")
+        self.allow_any.toggled.connect(self.map.set_allow_any)
+        row.addWidget(self.allow_any, 1)
+        sv.addLayout(row)
         self.box_x, self.box_y = spin(C.BOX_DEFAULT[0], 0.0, 1.3), spin(C.BOX_DEFAULT[1], -0.8, 0.8)
         self.box_yaw = spin(0.0, -30, 30, 5, 0, " deg")  # the gripper approach is fixed: a box turned further than this is not graspable
         self.tab_x, self.tab_y = spin(C.TABLE_CENTER[0], 0.3, 1.4), spin(C.TABLE_CENTER[1], -0.6, 0.6)
         self.tab_top = spin(C.TABLE_TOP, 0.5, 1.0)
+        self.place_x, self.place_y = spin(0.60, 0.0, 1.3), spin(-0.30, -0.8, 0.8)
+        precise = QtWidgets.QGroupBox("exact values (everything above can be dragged on the map)")
+        precise.setCheckable(True)
+        precise.setChecked(False)
+        inner = QtWidgets.QWidget()
+        sg = QtWidgets.QGridLayout(inner)
+        sg.setContentsMargins(0, 0, 0, 0)
         for r, (label, widgets) in enumerate((("box x / y / yaw", (self.box_x, self.box_y, self.box_yaw)),
-                                              ("table x / y / top", (self.tab_x, self.tab_y, self.tab_top)))):
+                                              ("table x / y / top", (self.tab_x, self.tab_y, self.tab_top)),
+                                              ("place target x / y", (self.place_x, self.place_y)))):
             sg.addWidget(QtWidgets.QLabel(label), r, 0)
             for c, w in enumerate(widgets):
                 sg.addWidget(w, r, c + 1)
-        for r, (text, slot) in enumerate((("apply box", self.apply_box), ("apply table", self.apply_table))):
+        for r, (text, slot) in enumerate((("apply box", self.apply_box), ("apply table", self.apply_table),
+                                          ("set target", self.apply_target))):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(slot)
             sg.addWidget(b, r, 4)
-        reset = QtWidgets.QPushButton("reset scene")
-        reset.clicked.connect(self.reset_scene)
-        sg.addWidget(reset, 2, 4)
-        self.allow_any = QtWidgets.QCheckBox("allow positions the arm cannot reach")
-        sg.addWidget(self.allow_any, 2, 0, 1, 4)
+        pl = QtWidgets.QVBoxLayout(precise)
+        pl.addWidget(inner)
+        inner.setVisible(False)
+        precise.toggled.connect(inner.setVisible)
+        sv.addWidget(precise)
         rv.addWidget(scene)
 
         tasks = QtWidgets.QGroupBox("tasks (executor)")
         tg = QtWidgets.QGridLayout(tasks)
-        self.place_x, self.place_y = spin(0.60, 0.0, 1.3), spin(-0.30, -0.8, 0.8)
-        tg.addWidget(QtWidgets.QLabel("place at x / y"), 0, 0)
-        tg.addWidget(self.place_x, 0, 1)
-        tg.addWidget(self.place_y, 0, 2)
+        self.target_label = QtWidgets.QLabel("place target: drag the blue square on the map")
+        tg.addWidget(self.target_label, 0, 0, 1, 3)
         self.use_image = QtWidgets.QCheckBox("camera correction (hybrid servo)")
         self.use_image.setChecked(True)
         tg.addWidget(self.use_image, 0, 3, 1, 2)
@@ -174,12 +183,12 @@ class ControlCenter(QtWidgets.QMainWindow):
         self.joints.horizontalHeader().setVisible(False)
         self.joints.verticalHeader().setVisible(False)
         self.joints.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.joints.setMaximumHeight(150)
+        self.joints.setMaximumHeight(120)
         self.joints.setStyleSheet("font-size: 10px;")
         rl.addWidget(self.joints)
-        rv.addWidget(robot, 2)
+        rv.addWidget(robot, 1)
         split.addWidget(right)
-        split.setSizes([900, 600])
+        split.setSizes([760, 740])
         self._enable_buttons()
 
     # ---- messages ----------------------------------------------------------------------------------------------------
@@ -220,6 +229,7 @@ class ControlCenter(QtWidgets.QMainWindow):
                 f"executor: {s.get('state')}  task: {s.get('task') or '-'}  phase: {s.get('phase')}   "
                 f"holding box: {'yes' if s.get('holding') else 'no'}   seeded: {'yes' if s.get('seeded') else 'no'}   "
                 f"gripper closeness {s.get('closeness', 0):.2f}   fingertips ({tip}) m")
+        self.map.set_table_min_edge(None if s.get("seeded") else C.SEED_EDGE_X)
         self._enable_buttons()
 
     def _enable_buttons(self):
@@ -251,7 +261,7 @@ class ControlCenter(QtWidgets.QMainWindow):
         if not self._check_box(x, y):
             return
         self.send_scene({"cmd": "set_box", "x": x, "y": y, "yaw_deg": self.box_yaw.value()})
-        self.map.set_box_request((x, y))
+        self.map.set_box((x, y), self.box_yaw.value())
         self.say(f"box -> ({x:.3f}, {y:.3f})")
 
     def apply_table(self):
@@ -273,24 +283,54 @@ class ControlCenter(QtWidgets.QMainWindow):
             w.setValue(v)
         self.table_top = C.TABLE_TOP
         self.map.set_table(C.TABLE_CENTER, C.TABLE_SIZE, C.TABLE_TOP)
-        self.map.set_box_request(None)
+        self.map.set_box(None, 0.0)
         self.map.set_target(None)
+        self.target_label.setText("place target: drag the blue square on the map")
         self.say("scene reset")
 
-    def _on_map(self, mode, x, y):
-        if mode == "box":
-            self.box_x.setValue(x)
-            self.box_y.setValue(y)
-            self.apply_box()
-        elif mode == "target":
-            self.place_x.setValue(x)
-            self.place_y.setValue(y)
-            self.map.set_target((x, y))
-            self._check_box(x, y)
-        elif mode == "table":
-            self.tab_x.setValue(x)
-            self.tab_y.setValue(y)
-            self.apply_table()
+    def _set_box(self, x, y, final=True):
+        self.box_x.setValue(x)
+        self.box_y.setValue(y)
+        self.send_scene({"cmd": "set_box", "x": x, "y": y, "yaw_deg": self.box_yaw.value()})
+        self.map.set_box((x, y), self.box_yaw.value())
+        if final:
+            self.say(f"box -> ({x:.3f}, {y:.3f})")
+
+    def _set_table(self, x, y, final=True):
+        """Moves the table; a box standing on it comes along (a box in the robot's hand does not)."""
+        dx, dy = x - self.tab_x.value(), y - self.tab_y.value()
+        self.tab_x.setValue(x)
+        self.tab_y.setValue(y)
+        self.table_top = self.tab_top.value()
+        self.send_scene({"cmd": "set_table", "x": x, "y": y, "top": self.table_top})
+        self.map.set_table((x, y), C.TABLE_SIZE, self.table_top)
+        if not self.exec_status.get("holding"):
+            self._set_box(self.box_x.value() + dx, self.box_y.value() + dy, final=False)
+        if final:
+            self.say(f"table -> centre ({x:.3f}, {y:.3f}) top {self.table_top:.3f}")
+
+    def _set_target(self, x, y, final=True):
+        self.place_x.setValue(x)
+        self.place_y.setValue(y)
+        self.map.set_target((x, y))
+        self.target_label.setText(f"place target: ({x:.3f}, {y:.3f}) m")
+        if final:
+            self.say(f"place target -> ({x:.3f}, {y:.3f})")
+
+    def _on_dragged(self, item, x, y, final):
+        {"box": self._set_box, "target": self._set_target, "table": self._set_table}[item](x, y, final)
+
+    def _on_chosen(self, item, x, y):  # right-click menu
+        {"box": self._set_box, "target": self._set_target, "table": self._set_table}[item](x, y, True)
+
+    def _on_rotated(self, degrees):    # mouse wheel over the box
+        yaw = min(30.0, max(-30.0, self.box_yaw.value() + degrees))
+        self.box_yaw.setValue(yaw)
+        self._set_box(self.box_x.value(), self.box_y.value(), final=False)
+        self.say(f"box turned to {yaw:.0f} deg")
+
+    def apply_target(self):
+        self._set_target(self.place_x.value(), self.place_y.value())
 
     # ---- tasks -------------------------------------------------------------------------------------------------------
     def _target_ok(self):
