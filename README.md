@@ -180,7 +180,8 @@ intervals under load, and joint impedance steps of the wrist and wrist roll over
 ```
 rainbowroboticsofficial/rby1-sim-isaac:<version>-<model>_v<model_version>[-isaac<isaac_version>][-r<rebuild>]
 
-e.g.) rainbowroboticsofficial/rby1-sim-isaac:0.11.0-a_v1.2-isaac6.2.0   # Model A v1.2, Isaac Sim 6.1.0, rebuild 1
+e.g.) rainbowroboticsofficial/rby1-sim-isaac:0.11.0-a_v1.2-isaac6.2.0      # Model A v1.2, Isaac Sim 6.2.0
+      rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2, Isaac Sim 6.1.0, rebuild 1
       rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0      # Model A v1.2, Isaac Sim 6.1.0
       rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2                 # Model A v1.2, Isaac Sim 5.1.0
 
