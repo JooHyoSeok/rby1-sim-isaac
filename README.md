@@ -29,7 +29,7 @@ examples/vservo/run_demo.sh      # GUI 없이 한 번: 집어서 들어올리고
 ```bash
 examples/gui/rbyctl.py scene                   # 보이는 상자(위치, 어느 상자 위에 있는지), 로봇 상태, 놓을 수 있는 빈 자리
 examples/gui/rbyctl.py stack green blue yellow # 아래부터 순서대로, 첫 상자는 제자리
-examples/gui/rbyctl.py unstack                 # 쌓은 걸 풀기: 맨 위 상자부터 빈 자리(가능하면 처음 자리)에 내려놓기
+examples/gui/rbyctl.py unstack                 # 쌓은 걸 풀기: 맨 위 상자부터 빈 자리(가능하면 처음 자리)에 내려놓기 (시뮬에서 확인)
 examples/gui/rbyctl.py move blue right         # 파란 상자를 집어서 빈 자리(right | left | near | far | center)에 놓기
 examples/gui/rbyctl.py pick yellow             # place, place-on, home, abort ... 은 --help
 ```
@@ -89,7 +89,7 @@ GUI에도 "tell the robot" 입력창이 있어(같은 플래너). GUI에서는 �
 - 오른손만 지원하고, 물체는 5x5x8cm 상자 3개야. 그리퍼 방향이 고정이라 상자를 ±30°보다 많이 돌리면 못 집어.
 - 시뮬레이터에서만 확인했고 실제 로봇에서는 안 돌려봤어. 영상 지연(0.12초)과 게인은 시뮬에 맞춰 정한 값이야.
 - GUI에서 `ABORT`, 테이블을 당긴 뒤 집기, `home`은 아직 시뮬에서 충분히 검증하지 못했어.
-- 상자 쌓기는 시뮬에서 한 번 끝까지 성공했을 뿐이야(반복 성공률은 아직 몰라). `move`(빈 자리로 옮기기), 다른 쌓는 순서, 쌓은 상자 풀기(`unstack`, 코드와 오프라인 시험만), 쌓는 도중 ABORT는 시뮬에서 안 해봤어.
+- 상자 쌓기는 시뮬에서 한 번 끝까지 성공했을 뿐이야(반복 성공률은 아직 몰라). `move`(빈 자리로 옮기기), 다른 쌓는 순서, 쌓는 도중 ABORT는 시뮬에서 안 해봤어. `unstack`은 한 번, 말로 시킨 쌓기와 "가운데만 빼줘"는 각각 한 번씩 성공했어.
 - 카메라-로봇 캘리브레이션(eye-to-hand, hand-eye 풀이)과 ACT 학습은 아직 안 만들었어.
 
 ## 시험
