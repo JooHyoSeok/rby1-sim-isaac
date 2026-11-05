@@ -104,9 +104,11 @@ def fit_rigid(model, obs):
     return R, t, float(np.sqrt(np.mean(np.sum((model @ R.T + t - obs) ** 2, axis=1))))
 
 
-def object_pose(points, model=OBJECT_MODEL, radius=0.12, max_rms=0.006):
+def object_pose(points, model=OBJECT_MODEL, radius=0.12, max_rms=0.006, max_tilt_deg=8.0):
     """Pose of the box from the triangulated red points. The landmark ids are unknown: take the cluster of >=3 points
-    within `radius` of each other and try every assignment of them to the model landmarks (the layout is asymmetric)."""
+    within `radius` of each other and try every assignment of them to the model landmarks. The layout is close to mirror
+    symmetric, so with three visible landmarks two assignments fit equally well (1.4 mm rms, 3 cm apart); the box stands
+    upright on the table, which rejects the tilted one: fits whose z axis is more than `max_tilt_deg` off vertical are skipped."""
     best = None
     for k in (4, 3):
         for idx in itertools.combinations(range(len(points)), k):
@@ -115,6 +117,8 @@ def object_pose(points, model=OBJECT_MODEL, radius=0.12, max_rms=0.006):
                 continue
             for perm in itertools.permutations(range(len(model)), k):
                 R, t, rms = fit_rigid(model[list(perm)], sub)
+                if R[2, 2] < np.cos(np.radians(max_tilt_deg)):
+                    continue
                 if rms < max_rms and (best is None or (k, -rms) > (best[0], -best[3])):
                     best = (k, R, t, rms, idx)
         if best is not None:

@@ -7,11 +7,29 @@ Visualization Manager:
     - Class: rviz_default_plugins/RobotModel
       Name: RBY1
       Enabled: true
+      Alpha: 0.35
       Description Source: Topic
       Description Topic:
         Value: /robot_description
         Durability Policy: Transient Local
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/TF
+      Name: camera frames
+      Enabled: true
+      Marker Scale: 0.06
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Frames:
+        All Enabled: false
+        wrist_right_cam:
+          Value: true
+        wrist_left_cam:
+          Value: true
+        ee_right:
+          Value: true
+        ee_left:
+          Value: true
     - Class: rviz_default_plugins/MarkerArray
       Name: table and box
       Enabled: true
@@ -46,8 +64,8 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.4
-      Focal Point: {X: 0.4, Y: 0, Z: 0.7}
+      Distance: 0.45
+      Focal Point: {X: 0.5, Y: -0.2, Z: 0.85}
       Pitch: 0.35
       Yaw: 0.9
     Saved: ~

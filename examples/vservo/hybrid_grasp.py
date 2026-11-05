@@ -1,18 +1,19 @@
-"""Hybrid visual-servoing grasp: stereo position-based approach, palm-camera image-based fine alignment, then grasp.
+"""Hybrid visual-servoing grasp: stereo position-based approach, wrist-camera (back of the hand) image-based fine alignment, then grasp.
 
 Runs inside the simulator container (rby1_sdk is installed only there) next to perception_node.py (ROS 2 container).
 The sim must run with docker/run_sdk.sh ... --gripper --gripper-name rb_gripper --vision:
   docker cp examples/vservo/{vision.py,servo.py,hybrid_grasp.py} examples/gripper_example.py rby1-sim-isaac:/tmp/
-  docker exec rby1-sim-isaac /isaac-sim/python.sh /tmp/hybrid_grasp.py
+  docker exec rby1-sim-isaac /isaac-sim/python.sh /tmp/hybrid_grasp.py [--no-servo]
 
   1. seed pose (torso squat, bent right arm), as in examples/grasp/grasp_object.py
   2. position-based: box pose from the stereo rig -> whole-body Cartesian move to a pre-grasp tip 12 cm in front of it
-  3. image-based: the palm camera sees the box landmarks; the pixel error against "box centre on the optical axis" is turned
-     into a lateral correction, repeated until it is below 2 px. This removes the steady-state error of the position loop and
+  3. image-based: the wrist camera sees the box landmarks; the box centre measured in the hand frame is turned into a
+     lateral correction that puts it on the tool line, repeated until it is below 2 mm. This removes the steady-state error of the position loop and
      of the stereo calibration, which the position-based step cannot see. Orientation stays with the position loop.
-  4. depth from the image (landmark spread) sets how far to advance, then close the gripper and lift.
+  4. the box distance measured in the image sets how far to advance, then close the gripper and lift.
 Tip positions are in the robot base frame (= world frame in this scene). Untested in the simulator.
 """
+import argparse
 import json
 import socket
 import sys
@@ -28,11 +29,13 @@ import servo                                    # noqa: E402
 from gripper_example import Gripper             # noqa: E402
 from sim_gripper_bridge import SimDynamixelBus  # noqa: E402
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--no-servo", action="store_true", help="skip the image-based step (position-based only), for comparison")
+args = parser.parse_args()
+
 TOOL = 0.12      # fingertips lie this far beyond the ee frame along -z_ee
 BACK = 0.12      # pre-grasp: fingertip distance in front of the box centre
-CAM_TO_TIP = 0.12 - 0.0789  # palm camera -> fingertip along the tool axis
-GRASP_DEPTH = CAM_TO_TIP - 0.005   # camera-to-box-centre distance at the grasp (the tip ends 5 mm past the centre)
-CONVERGED_PX = 2.0
+CONVERGED_M = 0.002   # lateral error at which the image loop stops
 LIFT = [-0.06, 0.0, 0.12]
 R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # tool axis forward, fingers open sideways
 TOOL_DIR = np.array([1.0, 0.0, 0.0])
@@ -133,29 +136,36 @@ assert est, "no box pose from the stereo rig (is perception_node.py running? are
 box_R = np.array(est[-1]["box"]["R"])
 box_t = np.mean([m["box"]["t"] for m in est], axis=0)
 print(f"stereo box estimate {np.round(box_t, 3)} ({est[-1]['box']['n']} landmarks)", flush=True)
-print("pre-grasp:", move_ee(box_t - [BACK, 0, 0], 4.0), flush=True)
+cmd_tip = box_t - [BACK, 0, 0]  # the commanded tip; the steps accumulate here, not on the measured tip, because the position
+print("pre-grasp:", move_ee(cmd_tip, 4.0), flush=True)  # loop's steady-state offset would otherwise be added again every step
 
-# 3. image-based fine alignment with the palm camera
-Z = None
-for i in range(10):
+# 3. image-based fine alignment with the wrist camera
+centre = None
+for i in range(0 if args.no_servo else 10):
     m = fresh()
     blobs = np.array(m["wrist"]) if m and m["wrist"] else np.zeros((0, 3))
     T_ee = ee_pose()
-    err, Z, n = servo.image_errors(blobs, servo.cam_pose(T_ee), box_R, box_t)
-    if err is None:
-        print("  no landmark in the palm camera; keeping the position-based pose", flush=True)
+    centre, Z, n = servo.box_in_ee(blobs, servo.cam_pose(T_ee), box_R, box_t)
+    if centre is None:
+        print("  no landmark in the wrist camera; keeping the position-based pose", flush=True)
         break
-    print(f"  iter {i}: pixel error ({err[0]:5.1f}, {err[1]:5.1f}), {n} landmarks, depth {Z * 100:.1f} cm", flush=True)
-    if np.linalg.norm(err) < CONVERGED_PX:
+    print(f"  iter {i}: box centre in the hand frame ({centre[0] * 1000:5.1f}, {centre[1] * 1000:5.1f}, {centre[2] * 1000:6.1f}) mm, "
+          f"{n} landmarks, camera depth {Z * 100:.1f} cm", flush=True)
+    if np.hypot(centre[0], centre[1]) < CONVERGED_M:
         break
-    move_ee(tip_position() + servo.lateral_step(err, Z, T_ee), 1.5)
+    cmd_tip = cmd_tip + servo.lateral_step(centre, T_ee)
+    move_ee(cmd_tip, 1.5)
 
-# 4. advance by the depth seen in the image, grasp, lift
-advance = (Z - GRASP_DEPTH) if Z else (box_t[0] + 0.005 - tip_position()[0])  # image depth, else the stereo estimate
+# 4. advance by the distance seen in the image, grasp, lift
+if centre is not None:  # centre z < 0 along the tool axis; the tip must end 5 mm past the centre: z_tip = -TOOL
+    advance = -centre[2] - (TOOL - 0.005)
+else:                   # no image: the stereo estimate
+    advance = box_t[0] + 0.005 - cmd_tip[0]
 advance = float(np.clip(advance, 0.0, BACK + 0.05))
-print(f"advance {advance * 100:.1f} cm:", move_ee(tip_position() + advance * TOOL_DIR, 3.0), flush=True)
+cmd_tip = cmd_tip + advance * TOOL_DIR
+print(f"advance {advance * 100:.1f} cm:", move_ee(cmd_tip, 3.0), flush=True)
 gripper.set_closed()
 time.sleep(2.0)
-print("lift:", move_ee(tip_position() + LIFT, 4.0), flush=True)
+print("lift:", move_ee(cmd_tip + LIFT, 4.0), flush=True)
 time.sleep(1.0)
 gripper.stop()

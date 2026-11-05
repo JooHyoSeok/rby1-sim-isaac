@@ -30,14 +30,13 @@ STEREO_TARGET = np.array([0.5, 0.0, 0.85])
 STEREO_BASELINE = 0.12
 
 # Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the wrist link;
-# the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()), the palm ends at about
-# z=-0.2 where the fingers attach. A camera on the thin side cannot see the fingertips (its own side plate hides them), so
-# the camera sits under the palm, between the fingers, and looks along the tool axis: the object stays in view and at the
-# image centre from far away down to the grasp, the open fingers fall outside the field of view (checked by projecting the
-# gripper geometry, see the commit message). Image right = x of the wrist link = the finger opening axis.
-# Not verified in the renderer yet: if the palm mesh reaches below z=-0.205 the camera starts inside it (move WRIST_CAM_Z).
-WRIST_CAM_Z = -0.205
-WRIST_CAM = {side: (np.array([0.0, 0.0, WRIST_CAM_Z]), np.array([0.0, 0.0, -1.0]), np.array([0.0, 1.0, 0.0]))
+# the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()), the palm ends at about z=-0.2
+# where the fingers attach. The camera sits on the back of the hand (+y face: the top when the fingers close sideways, as in
+# examples/grasp), 8 cm above the hand axis, looking forward and 15 degrees down: the tops of the fingertips and everything
+# from 6 cm past the tips on stay visible (projected gripper geometry, see the commit message).
+# A camera on the thin side or under the palm was tried first; see git history. Image right = x of the wrist link.
+# examples/vservo/servo.py repeats this pose (WRIST_EYE / WRIST_AIM): keep them equal.
+WRIST_CAM = {side: (np.array([0.0, 0.08, -0.12]), np.array([0.0, -0.08, -0.28]), np.array([0.0, 1.0, 0.0]))
              for side in ("left", "right")}
 
 FINGER_MASS = 0.02  # kg, for finger bodies whose USD sets no mass

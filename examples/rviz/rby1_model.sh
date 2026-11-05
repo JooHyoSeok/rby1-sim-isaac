@@ -32,11 +32,20 @@ view)
     R=(-r /tf:=/tf_urdf -r /tf_static:=/tf_static_urdf -p use_sim_time:=true)
     ros2 run robot_state_publisher robot_state_publisher --ros-args --params-file "${OUT}/rsp_params.yaml" \
         -r joint_states:=/rby1/joint_states "${R[@]}" &
-    trap 'kill $! 2>/dev/null' EXIT
+    PIDS=($!)
+    # Camera frames: fixed to the wrist links, so static TFs from the simulator's export of the mount (rby1_gt.json). The
+    # simulator's own TF node cannot publish camera prims.
+    if [[ -f "${H}/data/rby1_gt.json" ]]; then
+        while read -r args; do
+            ros2 run tf2_ros static_transform_publisher ${args} --ros-args -r /tf_static:=/tf_static_urdf &
+            PIDS+=($!)
+        done < <(/usr/bin/python3 "${HERE}/camera_tf_args.py" "${H}/data/rby1_gt.json")
+    fi
+    trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
     # RViz rewrites its config file on exit: open a temporary copy so the one in the repo stays as written
     CFG="$(mktemp --suffix=.rviz)"
     cp "${HERE}/rby1_model.rviz" "${CFG}"
-    trap 'kill $! 2>/dev/null; rm -f "${CFG}"' EXIT
+    trap 'kill "${PIDS[@]}" 2>/dev/null; rm -f "${CFG}"' EXIT
     rviz2 -d "${CFG}" --ros-args "${R[@]}"
     ;;
 *) echo "usage: $0 export|view" >&2; exit 1 ;;
