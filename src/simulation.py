@@ -147,11 +147,7 @@ class Simulation:
             gripper_server=self.gripper_server,
         )
         self.world.add_task(self.task)
-        if vision:
-            import omni.usd
-            import rby1_vision
-
-            rby1_vision.setup(lambda: omni.usd.get_context().get_stage())
+        self._vision = vision
         self.robot = None
         self.reset_needed = False
 
@@ -212,6 +208,11 @@ class Simulation:
         self.world.initialize_physics()
         self.robot = self.world.scene.get_object("RBY1")
         self._last_render_wall_time = 0.0
+        if self._vision:  # after the first reset: the robot and gripper prims exist only now
+            import omni.usd
+            import rby1_vision
+
+            rby1_vision.setup(lambda: omni.usd.get_context().get_stage())
         self.world.pause()
 
     def reset_simulation(self) -> None:

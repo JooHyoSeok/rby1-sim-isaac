@@ -8,7 +8,8 @@ in a rendered frame and tune (the wrist camera and EE landmark poses depend on t
 ROS 2 topics (sim-time stamped, published at the render rate, so pass ``--render-hz`` when headless):
   /clock, /rby1/joint_states
   /rby1/{stereo_left,stereo_right,wrist_left,wrist_right}/image_raw and /camera_info
-  /rby1/gt/tf   ground-truth poses of cameras, EE links and landmark roots w.r.t. the robot root (evaluation only)
+  /rby1/gt/tf   ground-truth wrist link poses w.r.t. the robot root (evaluation only)
+  rby1_gt.json  ground-truth fixed poses: stereo cameras, wrist camera and landmark offsets, object, targets
 """
 from __future__ import annotations
 
@@ -28,10 +29,12 @@ STEREO_EYE = np.array([float(v) for v in os.environ.get("RBY1_STEREO_EYE", "1.4,
 STEREO_TARGET = np.array([0.5, 0.0, 0.9])
 STEREO_BASELINE = 0.12
 
-# Wrist camera pose in the wrist link frame: (translation, look direction, up). Guess, tune on a rendered frame.
+# Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the
+# wrist link; the gripper spans x +-0.063, y +-0.032, z -0.246..-0.11 in that frame (printed by setup()). The camera
+# sits on the thin (y) side of the gripper base and looks past the fingertips.
 WRIST_CAM = {
-    "left": (np.array([0.0, -0.09, 0.03]), np.array([0.0, 0.0, 1.0]), np.array([0.0, -1.0, 0.0])),
-    "right": (np.array([0.0, 0.09, 0.03]), np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0])),
+    "left": (np.array([0.0, 0.07, -0.10]), np.array([0.0, -0.07, -0.25]), np.array([1.0, 0.0, 0.0])),
+    "right": (np.array([0.0, -0.07, -0.10]), np.array([0.0, 0.07, -0.25]), np.array([1.0, 0.0, 0.0])),
 }
 
 SPHERE_R = 0.012
@@ -152,8 +155,7 @@ def build_ros_graph(cams: dict[str, str]) -> None:
     conn += [(f"ReadJoints.outputs:{a}", f"PubJoints.inputs:{a}") for a in (
         "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
         "sensorTime")]
-    ee_links = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()]
-    gt_targets = list(cams.values()) + ee_links + ["/World/Object", "/World/Target"]
+    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()]  # PoseTree only accepts rigid bodies
     values = [
         ("ReadJoints.inputs:prim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
         ("PubJoints.inputs:topicName", "rby1/joint_states"),
@@ -181,6 +183,42 @@ def build_ros_graph(cams: dict[str, str]) -> None:
                        {keys.CREATE_NODES: nodes, keys.CONNECT: conn, keys.SET_VALUES: values})
 
 
+def _mat(m: Gf.Matrix4d) -> list:
+    """Row-vector USD matrix -> column-vector 4x4 (nested lists)."""
+    return np.array(m).T.tolist()
+
+
+def write_gt(stage, path: str) -> None:
+    """Ground truth that does not move with the robot (evaluation only), plus the gripper bounding box per wrist link."""
+    import json
+
+    flip = Gf.Matrix4d(1.0).SetDiagonal(Gf.Vec4d(1, -1, -1, 1))  # USD camera (-z forward, +y up) -> ROS optical (+z, +y down)
+    cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_])
+    xf = lambda p: UsdGeom.Xformable(stage.GetPrimAtPath(p))
+    gt = {"units": "m", "note": "T_a_b maps b-frame points into a; camera frames are ROS optical (+z forward, +y down)",
+          "stereo": {n: _mat(flip * xf(f"/World/StereoRig/{n}").ComputeLocalToWorldTransform(0)) for n in ("stereo_left", "stereo_right")},
+          "wrist": {}, "ee_landmarks_in_wrist_link": {f"P{i}": p for i, p in enumerate(EE_LANDMARKS, 1)},
+          "object_pose_world": _mat(xf("/World/Object").ComputeLocalToWorldTransform(0)),
+          "object_landmarks_in_object": {f"Q{i}": p for i, p in enumerate(OBJECT_LANDMARKS, 1)},
+          "target_spheres_world": {n: p for n, (p, _) in TARGET_SPHERES.items()}, "sphere_radius": SPHERE_R}
+    for side, link in WRIST_LINKS.items():
+        link_path = f"{ROBOT_ROOT}/{link}"
+        link_to_world = xf(link_path).ComputeLocalToWorldTransform(0)
+        cam_local = xf(f"{link_path}/wrist_cam").GetLocalTransformation()
+        gt["wrist"][side] = {"link": link, "T_link_camera": _mat(flip * cam_local)}
+        gripper = stage.GetPrimAtPath(f"{ROBOT_ROOT}/{side}_gripper")
+        if not gripper.IsValid():  # no --gripper
+            continue
+        box = cache.ComputeWorldBound(gripper).ComputeAlignedBox()
+        lo, hi = (link_to_world.GetInverse().Transform(v) for v in (box.GetMin(), box.GetMax()))
+        print(f"[Vision] {side} gripper extent in {link} frame: {[round(min(a, b), 3) for a, b in zip(lo, hi)]} .. "
+              f"{[round(max(a, b), 3) for a, b in zip(lo, hi)]}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(gt, f, indent=1)
+    print(f"[Vision] ground truth written to {path}")
+
+
 def setup(stage_getter) -> None:
     """Enable the ROS 2 bridge, build the scene and the publishing graph (call after the robot is in the stage)."""
     from isaacsim.core.utils.extensions import enable_extension
@@ -189,4 +227,5 @@ def setup(stage_getter) -> None:
     stage = stage_getter()
     cams = build_scene(stage)
     build_ros_graph(cams)
+    write_gt(stage, os.environ.get("RBY1_GT_PATH", "/isaac-sim/.local/share/ov/data/rby1_gt.json"))
     print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")
