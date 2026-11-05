@@ -289,6 +289,9 @@ class RBY1Task(BaseTask):
         self.udp_bridge = udp_bridge          # None -> standalone mode (no UDP)
         self.gripper_server = gripper_server if gripper_enabled else None
         self.force_ui = None                  # optional ExternalForceUI
+        # Set by Simulation(vision=True) before the scene is built: give the wrist and gripper meshes colliders. They
+        # must exist before physics starts to fall under the articulation's disabled self-collisions.
+        self.gripper_colliders = False
 
         self._last_command_seq = 0
         self._new_command_count_since_log = 0
@@ -351,6 +354,10 @@ class RBY1Task(BaseTask):
         add_reference_to_stage(usd_path=self.usd_path, prim_path=self.robot_prim_path)
         if self.gripper_asset_config is not None:
             self._add_gripper_to_robot(scene.stage)
+            if self.gripper_colliders:
+                from rby1_vision import add_gripper_colliders
+
+                add_gripper_colliders(scene.stage)
 
         self.rby_robot = RBY1Robot(
             prim_path=self.robot_prim_path,

@@ -23,16 +23,20 @@ parser.add_argument("--stop-after", choices=["pregrasp", "approach", "close", "l
                     help="stop after this stage (to look at the scene)")
 args = parser.parse_args()
 
-OBJECT = np.array([0.62, -0.20, 1.09])  # cube centre (src/rby1_vision.py OBJECT_POS)
+OBJECT = np.array([0.64, -0.20, 0.76])  # cube centre (src/rby1_vision.py OBJECT_POS)
 TOOL = 0.12      # fingertips lie this far beyond the ee frame along -z_ee (gripper extent in the wrist frame)
 BACK = 0.12      # fingertip distance in front of the object at the pre-grasp pose
-LIFT = 0.12
+LIFT_J0 = -0.2  # shoulder pitch change [rad] that lifts the hand ~14 cm: the IK leaves the wrist near-straight
+                # (right_arm_5 ~ 0, a Cartesian singularity), so the lift is a joint-space move
 # Tool axis (-z_ee) points forward (+x) and the fingers open sideways (x_ee = -y, y_ee = up, z_ee = -x). Reaching the
 # object from above needs the arm almost straight (a Cartesian singularity), so the hand comes in horizontally.
 R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)
 TOOL_DIR = np.array([1.0, 0.0, 0.0])
-# Right-arm joints (right_arm_0..6) found by a forward-kinematics grid search: hand about (0.41, -0.22, 1.11) with the
-# tool axis forward and the elbow well bent; the straight home pose is a Cartesian singularity.
+# Right-arm joints (right_arm_0..6) found by a forward-kinematics grid search: hand about (0.41, -0.22, 0.79) (lowered torso) with
+# the tool axis forward and the elbow well bent; the straight home pose is a Cartesian singularity.
+# Torso joints (torso_0..5) folded like a squat, torso upright: the shoulders drop from z=1.37 to 1.05, so an arm
+# can reach a normal table with a bent elbow.
+TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
 READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])
 
 robot = rby.create_robot_a("127.0.0.1:50051")
@@ -54,11 +58,18 @@ def recover():
     assert robot.enable_control_manager()
 
 
+def move_torso(q, seconds):
+    torso = rby.TorsoCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(q))
+    rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
+        rby.BodyComponentBasedCommandBuilder().set_torso_command(torso)))
+    print(f"torso: {robot.send_command(rc, 10).get().finish_code}", flush=True)
+
+
 def move_joints(q, seconds):
     arm = rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(q))
     rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
         rby.BodyComponentBasedCommandBuilder().set_right_arm_command(arm)))
-    print(f"ready pose: {robot.send_command(rc, 10).get().finish_code}", flush=True)
+    print(f"joint move: {robot.send_command(rc, 10).get().finish_code}", flush=True)
 
 
 dyn = robot.get_dynamics()
@@ -91,12 +102,13 @@ def move_ee(tip_xyz, seconds):
 
 
 recover()
-move_joints(READY, 3.0)
+move_torso(TORSO, 6.0)
+move_joints(READY, 8.0)
 stages = [
     ("pregrasp", lambda: move_ee(OBJECT - [BACK, 0, 0], 4.0)),
     ("approach", lambda: move_ee(OBJECT + [0.005, 0, 0], 3.0)),
     ("close", lambda: (gripper.set_closed(), time.sleep(2.0))),
-    ("lift", lambda: move_ee(OBJECT + [0, 0, LIFT], 3.0)),
+    ("lift", lambda: move_joints(np.array(robot.get_state().position)[8:15] + [LIFT_J0, 0, 0, 0, 0, 0, 0], 4.0)),
 ]
 for name, run in stages:
     print(name, flush=True)

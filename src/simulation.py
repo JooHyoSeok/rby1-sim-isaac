@@ -146,6 +146,7 @@ class Simulation:
             gripper_name=self.gripper_name,
             gripper_server=self.gripper_server,
         )
+        self.task.gripper_colliders = vision
         self.world.add_task(self.task)
         self._vision = vision
         self.robot = None

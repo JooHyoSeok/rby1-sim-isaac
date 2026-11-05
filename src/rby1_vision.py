@@ -26,7 +26,7 @@ FOCAL_MM, H_APERTURE_MM = 15.0, 20.955  # fx = IMAGE_W * FOCAL_MM / H_APERTURE_M
 
 # External stereo rig: eye centre, look-at point, baseline. Override with RBY1_STEREO_EYE="x,y,z".
 STEREO_EYE = np.array([float(v) for v in os.environ.get("RBY1_STEREO_EYE", "1.4,0.0,1.2").split(",")])
-STEREO_TARGET = np.array([0.5, 0.0, 1.0])
+STEREO_TARGET = np.array([0.5, 0.0, 0.85])
 STEREO_BASELINE = 0.12
 
 # Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the
@@ -37,15 +37,17 @@ WRIST_CAM = {
     "right": (np.array([0.0, -0.09, -0.03]), np.array([0.0, 0.09, -0.32]), np.array([1.0, 0.0, 0.0])),
 }
 
+FINGER_MASS = 0.02  # kg, for finger bodies whose USD sets no mass
 SPHERE_R = 0.012
 # Asymmetric red landmarks P1..P4 in the wrist link frame (P1 is the single sphere for eye-to-hand calibration).
 EE_LANDMARKS = [(0.04, 0.0, 0.05), (-0.04, 0.03, 0.06), (0.0, -0.05, 0.08), (0.03, 0.05, 0.10)]
 # Table, object, object landmarks Q1..Q4 (object frame) and the R/B/Y calibration target (table frame, on top).
-# The shoulders are at z=1.37 and an arm reaches ~0.53 m, so the table top is high (1.05) to keep the arms bent.
-TABLE_TOP = 1.05
-TABLE_CENTER, TABLE_SIZE = (0.8, 0.0, TABLE_TOP / 2), (0.6, 0.8, TABLE_TOP)
+# Table height for the lowered-torso grasp posture (grasp_object.py TORSO: shoulders at z=1.05).
+TABLE_TOP = 0.72
+# A thin top without legs: a solid box down to the floor gets hit by the hand when it swings up from the hanging pose.
+TABLE_CENTER, TABLE_SIZE = (0.88, 0.0, TABLE_TOP - 0.02), (0.6, 0.8, 0.04)  # front edge x=0.58
 OBJECT_SIZE = (0.05, 0.05, 0.08)  # tall enough to be grasped above the table surface
-OBJECT_POS = (0.62, -0.20, TABLE_TOP + OBJECT_SIZE[2] / 2)  # centre of the cube resting on the table
+OBJECT_POS = (0.64, -0.20, TABLE_TOP + OBJECT_SIZE[2] / 2)  # centre of the cube resting on the table
 OBJECT_MASS, OBJECT_FRICTION = 0.1, 1.5  # a dynamic rigid body the gripper can lift
 OBJECT_LANDMARKS = [(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.037, 0.0), (-0.02, -0.037, 0.0)]
 TARGET_SPHERES = {"R": ((0.65, 0.25, TABLE_TOP + SPHERE_R), (1, 0, 0)),
@@ -110,7 +112,10 @@ def _friction_material(stage) -> UsdShade.Material:
 
 def add_gripper_colliders(stage) -> None:
     """The robot USDs ship without collision geometry on the wrist link and the whole gripper, so the hand passes
-    through the table and the object. Give those meshes convex-hull colliders and the high-friction material."""
+    through the table and the object. Give the finger meshes convex-hull colliders and the high-friction material
+    (the palm and wrist hulls jam against the forearm when the elbow folds, so they stay without).
+    Called from RBY1Task.set_up_scene, i.e. before physics starts (shapes added later are not covered by the
+    articulation's disabled self-collisions and jam the arm against itself)."""
     friction = _friction_material(stage)
     roots = [f"{ROBOT_ROOT}/{n}" for n in (*WRIST_LINKS.values(), "left_gripper", "right_gripper")]
     for _ in range(4):  # meshes inside instanceable prims cannot be edited: un-instance (nested instances need passes)
@@ -119,14 +124,35 @@ def add_gripper_colliders(stage) -> None:
                 if prim.IsInstance():
                     prim.SetInstanceable(False)
     count = 0
+    finger_bodies = set()
     for root in roots:
         for prim in Usd.PrimRange(stage.GetPrimAtPath(root)):
-            if prim.IsA(UsdGeom.Mesh):
+            if prim.IsA(UsdGeom.Mesh) and "finger" in str(prim.GetPath()):
+                body = prim
+                while body and not body.HasAPI(UsdPhysics.RigidBodyAPI):
+                    body = body.GetParent()
+                if body:
+                    finger_bodies.add(body)
                 UsdPhysics.CollisionAPI.Apply(prim)
                 UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("convexHull")
                 UsdShade.MaterialBindingAPI.Apply(prim).Bind(friction, UsdShade.Tokens.weakerThanDescendants, "physics")
                 count += 1
-    print(f"[Vision] {count} gripper/wrist meshes got convex-hull colliders")
+    # The articulation's disabled self-collisions do not cover these shapes: the fingers jam against the forearm when
+    # the elbow folds. Filter every finger body against every other robot body; the object and table still collide.
+    robot_bodies = [p.GetPath() for p in Usd.PrimRange(stage.GetPrimAtPath(ROBOT_ROOT)) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+    for body in finger_bodies:
+        rel = UsdPhysics.FilteredPairsAPI.Apply(body).CreateFilteredPairsRel()
+        for other in robot_bodies:
+            if other != body.GetPath():
+                rel.AddTarget(other)
+    # A collider without an authored mass adds volume*density to its body: heavy convex hulls would overload the elbow.
+    for body in finger_bodies:
+        mass = UsdPhysics.MassAPI.Apply(body).GetMassAttr()
+        print(f"[Vision] {body.GetPath()} mass authored={mass.HasAuthoredValue()} value={mass.Get()}")
+        if not mass.HasAuthoredValue() or not mass.Get():
+            mass.Set(FINGER_MASS)
+    print(f"[Vision] {count} finger meshes got convex-hull colliders, {len(finger_bodies)} finger bodies filtered "
+          f"against {len(robot_bodies)} robot bodies")
 
 
 def build_scene(stage) -> dict[str, str]:
@@ -286,7 +312,6 @@ def setup(stage_getter) -> None:
     enable_extension("isaacsim.ros2.bridge")
     stage = stage_getter()
     cams = build_scene(stage)
-    add_gripper_colliders(stage)
     build_ros_graph(cams, stage)
     write_gt(stage, os.environ.get("RBY1_GT_PATH", "/isaac-sim/.local/share/ov/data/rby1_gt.json"))
     print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")
