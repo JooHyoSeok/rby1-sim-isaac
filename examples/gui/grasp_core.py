@@ -385,7 +385,6 @@ class GraspRobot:
         if base:
             self._align_over(base)
             down = np.array([self.cmd_tip[0], self.cmd_tip[1], down[2]])   # straight down from where the alignment ended
-            back = down + np.array([-0.10, 0.0, 0.0])
         self.event("place: lower")
         self.debug(stage="place: lower", text=["place", "lower"])
         self._move_tip(down, "lower", duration=3.0)
@@ -393,10 +392,21 @@ class GraspRobot:
         self.gripper.set_open()
         placed, self.holding, self.held = self.held, False, None
         self._hold(1.5)
-        self.event("place: back off")
+        back = self._back_off(down)
+        self.event(f"place: back off {np.linalg.norm(back - down) * 100:.0f} cm")
         self._move_tip(back, "back off", duration=2.0)
         self.debug(stage="done", text=["done"])
         return placed
+
+    @staticmethod
+    def _back_off(down):
+        """Where the hand goes after the release: 10 cm back, less if the reach model stops it earlier (on a stack the wrist is closer
+        to the shoulder). 4 cm is enough to clear the box with the fingers."""
+        for d in (0.10, 0.08, 0.06, 0.05, 0.04):
+            back = down + np.array([-d, 0.0, 0.0])
+            if C.tip_reachable(back):
+                return back
+        raise TaskError(f"cannot back off from the box placed at {np.round(down, 3).tolist()}: out of reach")
 
     def place(self, x, y, top=C.TABLE_TOP):
         """Carry the held box over (x, y), lower it onto the table, let go, back off."""

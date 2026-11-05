@@ -13,7 +13,7 @@ K = np.array([[FX, 0, W / 2], [0, FY, H / 2], [0, 0, 1.0]])
 
 # Landmarks of a box in the box frame (src/rby1_vision.py OBJECT_LANDMARKS); the box centre is the frame origin. Every box has
 # the same layout in its own colour (src/rby1_vision.py BOXES); red spheres are the hand and calibration target landmarks.
-OBJECT_MODEL = np.array([(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.037, 0.0), (-0.02, -0.037, 0.0)])
+OBJECT_MODEL = np.array([(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.05, 0.0), (-0.02, -0.05, 0.0)])
 BOX_COLORS = ("blue", "green", "yellow")
 LANDMARK_MAX_AREA = 900  # [px] a sphere seen by the stereo rig or the wrist camera is smaller than this: bigger blobs are scenery
 

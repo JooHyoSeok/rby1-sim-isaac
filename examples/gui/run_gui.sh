@@ -4,6 +4,7 @@
 #   examples/gui/run_gui.sh [options]
 #     --rviz            also open RViz (robot model, camera frames, table and box)
 #     --keep            leave the simulator running after the window is closed
+#     --no-window       no control centre: start the rest and wait (Ctrl-C stops everything); drive it with examples/gui/rbyctl.py
 #     --cpuset CPUS     pin the simulator to these cores (default: the last 6; "" = no pinning)
 #     --image TAG       simulator image tag (default 0.10.7-a_v1.2-isaac6.1.0-r1)
 #
@@ -18,14 +19,15 @@ SIM=rby1-sim-isaac
 IMAGE=0.10.7-a_v1.2-isaac6.1.0-r1
 CORES="$(nproc)"
 CPUSET="$((CORES - 6))-$((CORES - 1))"
-RVIZ=0; KEEP=0
+RVIZ=0; KEEP=0; WINDOW=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rviz) RVIZ=1; shift ;;
         --keep) KEEP=1; shift ;;
+        --no-window) WINDOW=0; shift ;;
         --cpuset) CPUSET="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 1 ;;
     esac
 done
@@ -106,6 +108,12 @@ if [[ "${RVIZ}" == "1" ]]; then
     else
         echo "no URDF yet (run examples/rviz/rby1_model.sh export once): skipping RViz"
     fi
+fi
+
+if [[ "${WINDOW}" == "0" ]]; then
+    say "4/4 no window: ready. Drive it with examples/gui/rbyctl.py; Ctrl-C (or killing this script) stops everything"
+    trap 'exit 0' INT TERM      # the EXIT trap (cleanup) runs; `wait` lets the signal through at once
+    while true; do sleep 3600 & wait $!; done
 fi
 
 say "4/4 control centre (close the window to stop everything)"

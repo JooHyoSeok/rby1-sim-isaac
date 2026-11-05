@@ -105,6 +105,10 @@ def test_helpers():
     assert grasp_core.smoothstep(0) == 0 and grasp_core.smoothstep(1) == 1 and abs(grasp_core.smoothstep(0.5) - 0.5) < 1e-9
     above, down, back = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.28, 0.72)
     assert above[2] >= 0.88 and abs(above[0] - 0.625) < 1e-9 and abs(above[1] + 0.28) < 1e-9
+    table_down, stack_down = np.array([0.625, -0.22, 0.764]), np.array([0.625, -0.229, 0.924])   # the third box of a stack, from the simulator run
+    assert np.allclose(grasp_core.GraspRobot._back_off(table_down) - table_down, [-0.10, 0, 0])
+    stack_back = grasp_core.GraspRobot._back_off(stack_down)
+    assert -0.10 < (stack_back - stack_down)[0] <= -0.04 and C.tip_reachable(stack_back)           # the arm model allows less than 10 cm back there
     top2 = grasp_core.place_waypoints(np.array([0.58, -0.2, 0.88]), 0.62, -0.22, 0.88)      # on a stack of two: carried above its top
     assert top2[0][2] >= 0.88 + 0.04 + grasp_core.HOVER - 1e-9 and abs(top2[1][2] - (0.88 + 0.04 + 0.004)) < 1e-9
     assert abs(down[2] - (0.72 + 0.04 + 0.004)) < 1e-9 and np.allclose(back - down, [-0.10, 0, 0])
