@@ -174,8 +174,6 @@ class GraspRobot:
     def _stream_to(self, tip_xyz):
         """Replace the whole-body Cartesian target; the robot tracks it continuously (reached within 0.3 s, held for 1 s)."""
         rby = self.rby
-        if self.stream is None:
-            self.stream = self.robot.create_command_stream(10)
         T = np.eye(4)
         T[:3, :3] = R_FRONT
         T[:3, 3] = np.asarray(tip_xyz) - TOOL * np.array([1.0, 0.0, 0.0])
@@ -183,8 +181,18 @@ class GraspRobot:
                 .set_minimum_time(0.3).add_target("base", "ee_right", T, 0.3, 1.0, 1.0))
         for joint, q in self.left_hold.items():
             cart.add_joint_position_target(joint, float(q))
-        self.stream.send_command(rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
-            rby.BodyCommandBuilder().set_command(cart))), 200)
+        rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
+            rby.BodyCommandBuilder().set_command(cart)))
+        for attempt in (0, 1):
+            if self.stream is None:
+                self.stream = self.robot.create_command_stream(10)
+            try:
+                self.stream.send_command(rc, 200)
+                return
+            except RuntimeError as exc:
+                if "expired" not in str(exc) or attempt:
+                    raise
+                self.stream = None   # a stream that sat idle (between two tasks) expires: open a new one and send again
 
     def _joint_move(self, body_builder, name):
         """Blocking joint-space move that can be aborted."""
