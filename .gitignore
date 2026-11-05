@@ -31,3 +31,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# course slides (not ours to publish)
+/week*.pdf

@@ -1,219 +1,86 @@
-# rby1-sim-isaac
+# RBY1 비주얼 서보잉 pick & place (Isaac Sim)
 
-Rainbow Robotics **RBY1** robot simulator powered by **NVIDIA Isaac Sim 5.1.0**.
+Rainbow Robotics **RB-Y1**을 NVIDIA Isaac Sim에서 카메라만 보고 상자를 집어서 원하는 위치에 내려놓게 만든 프로젝트야. DGIST *Intelligent Robot Manipulation* 수업의 카메라-로봇 캘리브레이션, 포즈 추정, 비주얼 서보잉 과제를 RBY1 시뮬레이터 위에서 해보려고 [RainbowRobotics/rby1-sim-isaac](https://github.com/RainbowRobotics/rby1-sim-isaac)를 fork해서 만들었어. 시뮬레이터 본체와 SDK 연동은 upstream 그대로고, 이 fork가 얹은 것만 아래에 적었어. (upstream README는 [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md)에 그대로 있어.)
 
-<img width="2267" height="1275" alt="RBY1 robot in Isaac Sim" src="docs/Isaac_sim_scene.png?v=3" />
+<!-- 데모 영상: GitHub에서 이 README를 편집하면서 mp4 파일을 끌어다 놓으면 이 자리에 재생 링크가 들어가. -->
 
-## Requirements
+## 이 fork가 하는 일
 
-* NVIDIA GPU + driver
-* [Docker](https://docs.docker.com/engine/install/)
-* [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+- **카메라**: 고정 스테레오 2대와 양손 손등 카메라, 상자와 손에 빨간 구 landmark를 달았고, 영상과 관절 상태가 시뮬 타임스탬프와 함께 ROS 2 토픽으로 나가.
+- **인식**: 스테레오 삼각측량으로 상자 포즈를 구해(오차 1~3mm). 코드는 numpy만 써.
+- **하이브리드 비주얼 서보잉**: 스테레오로 상자 위치를 대략 잡고, 마지막 정렬은 손등 카메라 영상으로 닫아. 위치 제어와 캘리브레이션이 남기는 정상상태 오차를 영상이 직접 지워.
+- **연속 제어**: 20Hz 루프 하나가 목표를 계속 밀어서 SDK 명령 스트림으로 보내. "움직이고 → 멈추고 → 다시 측정"이 없어.
+- **전신 IK**: 몸통까지 같이 푸는 Cartesian 명령(rby1 core). 몸통을 접어서 어깨를 낮추고 팔을 굽혀서 일반 높이 테이블에 닿게 했어.
+- **충돌 형상**: upstream USD는 손목 링크와 그리퍼에 충돌 형상이 없어서 손이 물체를 통과해. 시작할 때 코드로 손가락에 충돌 형상과 마찰을 붙여(USD는 안 건드려).
+- **통합 관제 GUI (Qt)**: 카메라 4개, 위에서 본 장면 지도(상자, 놓을 위치, 테이블을 드래그로 이동), 관절 상태, pick / place / pick and place / home / ABORT.
+- **RViz**: URDF(USD에서 추출, 그리퍼 포함)와 TF, 테이블과 상자 마커.
 
-### Minimal install check
+## 실행
 
-```bash
-nvidia-smi
-docker --version
-dpkg -l | grep -E 'nvidia-container-toolkit|nvidia-container-runtime'
-```
-
-If `nvidia-smi` prints the GPU table and the last command lists an NVIDIA
-container package, the NVIDIA driver, Docker, and NVIDIA Container Toolkit are
-installed.
-
-## Quick start
-
-### 1. Clone the repository
+필요한 것: NVIDIA GPU와 드라이버, Docker와 nvidia-container-toolkit, 시뮬 이미지 `rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0-r1`, **ROS 2 Jazzy 컨테이너**(이름 `intelligent-robotic-manipulation`, `--network=host`, python3와 numpy와 OpenCV 포함: 인식 노드가 여기서 돌아), 호스트의 `/usr/bin/python3`에 PyQt5와 ROS 2 Jazzy(`rclpy`).
 
 ```bash
-git clone https://github.com/RainbowRobotics/rby1-sim-isaac.git
-cd rby1-sim-isaac
+examples/gui/run_gui.sh          # 시뮬, 인식 노드, 실행기, 관제 GUI를 한 번에 (창을 닫으면 전부 정리)
+examples/vservo/run_demo.sh      # GUI 없이 한 번: 집어서 들어올리고 결과를 시뮬 정답으로 확인
 ```
 
-### 2. Run
+켜는 데 약 2분 걸려(시뮬 부팅). GUI에서는 이렇게 써:
 
-| Script | Robot control | Robot UDP bridge | `app_main isaac` |
-|--------|---------------|------------------|------------------|
-| `docker/run.sh` | Built-in standalone PD trajectory | Disabled by default | Not started |
-| `docker/run_sdk.sh` | rby1-sdk / rby1 core commands | Enabled via `--udp` | Started automatically |
+1. 지도에서 주황 상자나 파란 "place here" 표시를 **끌어서** 옮겨. 팔이 닿을 수 있는 곳(초록)으로 자동으로 붙어. 상자 위에서 휠을 돌리면 방향이 돌아가.
+2. `pick`을 누르면 로봇이 준비 자세를 잡은 뒤 서보잉으로 상자를 집어서 들어올려. `place`는 들고 있는 상자를 파란 표시 위치에 내려놓고, `pick and place`는 둘을 이어서 해.
+3. `ABORT`로 진행 중인 작업을 멈춰(설계상 동작 중에도 멈추게 만들었는데, 시뮬에서 충분히 검증하진 못했어. 아래 한계 참고).
 
-#### rby1-sdk UDP integration mode
+컨테이너 이름이나 시뮬 이미지가 다르면 `examples/gui/run_gui.sh`와 `examples/vservo/run_demo.sh` 위쪽의 `ROS=`와 `IMAGE=` 값을 고치면 돼.
 
-Connects rby1-sdk with the Isaac Sim container to enable robot control via rby1 core.
+## 어떻게 동작하나
+
+```
+ 시뮬 (Isaac Sim, 컨테이너)                        ROS 2 컨테이너                 호스트
+ ───────────────────────────                      ──────────────────            ──────────────────
+ 카메라 4대, 관절 상태, GT  ── ROS 2 토픽 ──────▶  인식 노드                     관제 GUI (Qt)
+ 장면 명령 서버 (UDP 5110) ◀──────────────────────────────────────────────────── 상자/테이블 이동
+ 실행기 서비스 (UDP 5120) ◀─────────────── pick / place / abort ────────────────  버튼
+   └ 20Hz 서보 루프 → SDK 명령 스트림 → rby1 core (전신 IK) → 로봇
+```
+
+- 상자 포즈: 스테레오 두 영상의 빨간 구 중심을 삼각측량하고, 랜드마크를 강체 변환으로 맞춰(Arun SVD).
+- 정렬: 손등 카메라가 본 랜드마크로 상자 중심을 손 좌표계에서 구하고, 영상이 찍힌 시점의 손 위치를 써서 지연을 보정한 뒤 도구선 위로 끌어와.
+- 자세한 설계 이유는 각 파일 위쪽의 설명(docstring)에 적어놨어.
+
+## 폴더
+
+| 위치 | 내용 |
+|---|---|
+| `src/rby1_vision.py` | 카메라, landmark, 테이블, 물리 상자, 충돌 형상, ROS 2 발행, 실행 중 장면 명령 (`--vision` 옵션) |
+| `examples/gui/` | 관제 GUI, 실행기 서비스(`grasp_core.py`, `servo_server.py`), 한 줄 실행 `run_gui.sh`, 오프라인 시험 |
+| `examples/vservo/` | 인식(`vision.py`), 서보 제어(`servo.py`), 한 번 실행 `run_demo.sh`, 시험 |
+| `examples/grasp/` | 서보 없이 위치 제어로 집는 최소 예제 |
+| `examples/rviz/` | URDF 추출과 합치기(그리퍼 포함), RViz 설정 |
+| `examples/calibration_data/` | 무작위 자세로 이미지와 관절 상태를 모으는 캘리브레이션용 수집 도구 |
+
+## 측정한 결과 (시뮬레이터)
+
+- 스테레오 상자 위치: 1~3mm 오차(랜드마크 3개로 충분).
+- 스테레오 추정을 일부러 **(y +2cm, z +5cm) 틀리게** 줬을 때: 위치 제어만 쓰면 손가락이 허공을 잡고 실패하지만, 영상 보정을 켜면 손 좌표계에서 본 오차가 46.9mm에서 0.6mm로 줄고 3.7초 만에 도착해서 집어 올려(손끝 속도는 0에서 7.3cm/s까지 올라갔다 부드럽게 내려와, 중간에 멈추지 않아).
+- pick and place: 목표 (0.633, -0.256)에 놓았더니 (0.623, -0.255)에 상자가 똑바로 섰어(x 방향 약 10mm 오차).
+
+## 한계와 아직 안 한 것
+
+- **닿는 범위가 좁아**: 팔이 짧아서 기본 테이블에서는 상자가 설 수 있는 위치가 x 0.62~0.65 근처 한 줄뿐이야. 테이블을 로봇 쪽으로 당기면 넓어지지만, 준비 자세로 가기 전에는 테이블 앞 모서리가 x 0.57보다 가까우면 팔꿈치가 걸려(GUI가 막아줘).
+- 오른손만 지원하고, 물체는 5x5x8cm 상자 하나야. 그리퍼 방향이 고정이라 상자를 ±30°보다 많이 돌리면 못 집어.
+- 시뮬레이터에서만 확인했고 실제 로봇에서는 안 돌려봤어. 영상 지연(0.12초)과 게인은 시뮬에 맞춰 정한 값이야.
+- GUI에서 `ABORT`, 테이블을 당긴 뒤 집기, `home`은 아직 시뮬에서 충분히 검증하지 못했어.
+- 카메라-로봇 캘리브레이션(eye-to-hand, hand-eye 풀이)과 ACT 학습은 아직 안 만들었어.
+
+## 시험
+
+시뮬레이터 없이 도는 확인 코드가 있어.
 
 ```bash
-./docker/run_sdk.sh --image 0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2
-./docker/run_sdk.sh --image 0.10.7-m_v1.2-isaac6.1.0-r1   # Model M v1.2
-./docker/run_sdk.sh --image 0.10.7-a_v1.2-isaac6.1.0-r1 --gripper --gripper-name rb_gripper
-HEADLESS=1 ./docker/run_sdk.sh --image 0.10.7-a_v1.2-isaac6.1.0-r1   # no GUI window (faster lockstep)
+QT_QPA_PLATFORM=offscreen /usr/bin/python3 examples/gui/test_offline.py   # GUI, 지도, 실행기 명령 처리 (가짜 로봇)
+/usr/bin/python3 examples/vservo/test_servo.py                            # 서보 제어식 (핀홀 카메라 모의)
 ```
 
-#### Standalone mode
+## 라이선스와 출처
 
-Runs Isaac Sim only. The robot is controlled by the built-in PD trajectory in `RBY1Task`; no `app_main` process is started and the robot command/state UDP bridge is disabled.
-
-```bash
-./docker/run.sh --image 0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2
-./docker/run.sh --image 0.10.7-m_v1.2-isaac6.1.0-r1   # Model M v1.2
-GRIPPER_NAME=rb_gripper ./docker/run.sh --image 0.10.7-m_v1.2-isaac6.1.0-r1
-```
-
-The default launch uses the no-gripper base USD. Additional arguments after
-`--image` are forwarded to `simulation.py`, including `--gripper`,
-`--gripper-name <name>`, and `--no-sim-gripper`. A gripper can also be selected
-and enabled with the `GRIPPER_NAME` environment variable.
-
-### Run options
-
-| Environment / argument | Default | Meaning |
-|---|---|---|
-| `HEADLESS=1` (`--headless`) | off | No GUI windows (Isaac Sim with `--headless`, rby1 core with `RBY1_HEADLESS=1`) and no rendering. Recommended for SDK/lockstep runs: drawing the window can slow the lockstep loop far below real time (seen at 1/40 on a VM X server). `--render-hz` renders anyway. |
-| `RBY1_SERVO_PROFILE` | `delayed` | Joint servo model. `delayed`: per-group equivalent command delay (0-16 ms) matched to the robot's step response. `no_delay`: same gains without delay (arm steps ~10 ms faster than the robot). |
-| `RBY1_FF_DELAY` | `fitted` | Delay of torque commands (feedforward torque, feedback gain): `fitted` per group from joint impedance steps, `equal` = the target delay, `measured` = the drivers' 14-17 ms (over-delays). |
-| `RBY1_UDP_INLINE_RECV` | `1` | Read UDP commands in the simulation thread (no receive-thread handoff per 2 ms tick). `0` = background thread. |
-| `RBY1_PHYSICS_DEVICE` (`--physics-device`) | `gpu` | PhysX pipeline, `gpu` or `cpu` (no measured speed difference for this single articulation). |
-| `RBY1_FRICTION_MODEL` | `physx` | `physx`: PhysX joint-axis friction. `torque`: the same Coulomb/viscous values as an explicit torque in the PD loop. |
-| `RBY1_TIMING_LOG=1` | off | Print the time per lockstep step by part (physics, UDP wait, state, effort, render) every 500 steps. |
-| `RBY1_REALTIME` | on with `--udp`, off standalone | Pace the physics steps to wall-clock time (one step per 2 ms); a late step does not wait, so the loop catches up. `0` runs as fast as possible, `1` paces standalone runs too. |
-| `CPUSET` | - | Pin the container to CPU cores (`--cpuset-cpus`); give it 16+ cores, Kit runs a task thread per core. |
-| `CACHE_CHOWN=1` | off | `run.sh` grants the container user (uid 1234) access to cache folders owned by the invoking user with an ACL (`setfacl`, no sudo); set this to chown them to 1234 with sudo instead. |
-
-The Isaac Sim 5.1 images (`0.10.7-*_v1.2`) crash in the RTX renderer (`librtx.scenedb`) at startup on an RTX 5090
-with driver 615.71, also headless; use the Isaac Sim 6.1 images there.
-
-### Joint servo model
-
-The simulated joint servo (`src/rby1_task.py`, `src/rby1_controller.py`, `src/config.py`) reproduces the drivers
-identified on an RB-Y1 Model A v1.2: stiffness `kp` as measured (about 2x the motor-datasheet values used before),
-a per-group delay of the command (target, feedback gain and feedforward torque) and a D term on the undelayed joint
-velocity. The previous D term used a 10-sample moving-average velocity (~9 ms lag), which excited the elbow and
-wrist at the identified gains. Motor profiles (`src/motor_profiles.py`) and drive effort limits in the USD
-(shoulder 136.5, elbow 78, wrist roll 44 Nm = measured driver saturation) come from the same measurements.
-
-Checked through the rby1 core in SDK mode (`-isaac6.1.0-r1` image, rb_gripper mounted) against the same experiments on
-the robot:
-
-| Experiment | Robot | Simulation |
-|---|---|---|
-| Position step 0.5/1 deg, overshoot / 90 % rise: shoulder | 11.5 % / 31 ms | 11.2 % / 34 ms |
-| elbow | 12.3 % / 29 ms | 12.9 % / 31 ms |
-| wrist | 24.2 % / 28 ms | 26.7 % / 31 ms |
-| wrist roll | 55.2 % / 26 ms | 57.6 % / 30 ms |
-| Position step 0.2 deg, lower / upper torso overshoot | 4.6 % / 4.0 % | 3.8 % / 5.2 % |
-| Chirp 0.3 deg 0.2-15 Hz, amplitude ratio 1-10 Hz (shoulder, elbow) | 0.99-1.04 | 0.97-1.02 |
-| Joint impedance step, overshoot / 50 % delay: shoulder K 900 | 7.8 % / 27.7 ms | 7.7 % / 23 ms |
-| elbow K 500 | 14.5 % / 31.7 ms | 12 % / 20 ms |
-| wrist K 500, right_arm_4 / right_arm_5 | 30 % / 36 %, 21.5 ms | 29 % / 25 %, 18-20 ms |
-| wrist roll K 1000 | 25 % / 58 ms | 25 % / 41 ms |
-
-The robot's structural resonances (torso ~2.5 Hz, arm ~10-12 Hz) are not modeled (rigid links). In joint impedance
-mode the robot follows the reference later than the simulation (elbow 31.7 vs 20 ms to 50 %, wrist roll 58 vs 41 ms)
-with similar overshoot; a longer torque delay does not close that gap (it only raises the overshoot), so it is
-left open.
-
-### Custom gripper assets
-
-The simulator loads gripper assets by folder name, so a different hand can be
-attached without modifying the base RBY1 USD. Place the hand USD files and mount
-configuration under `assets/gripper/<gripper-name>/`:
-
-<img width="1280" height="900" alt="RBY1 custom gripper attachment structure" src="docs/gripper_attachment_overview.svg?v=2" />
-
-```text
-assets/gripper/<gripper-name>/
-├── <gripper-name>_left.usd
-├── <gripper-name>_right.usd
-└── gripper.json
-```
-
-`gripper.json` defines which prim in each hand is fixed to the robot wrist:
-
-```json
-{
-  "left": {
-    "body": "link_mount_left",
-    "mount_pos": [0.0, 0.0, -0.1261],
-    "mount_rot": [0.0, 0.70710678, -0.70710678, 0.0]
-  },
-  "right": {
-    "body": "link_mount_right",
-    "mount_pos": [0.0, 0.0, -0.1261],
-    "mount_rot": [0.0, 0.70710678, 0.70710678, 0.0]
-  }
-}
-```
-
-For example, a user-provided hand can be tested by placing USD files under
-`assets/gripper/custom_gripper/` and launching:
-
-```bash
-./docker/run.sh --image 0.10.7-a_v1.2 --gripper --gripper-name custom_gripper
-```
-
-User-provided USD files are not included in this repository; only the attachment
-pattern and `gripper_servers/custom_gripper.py` adapter skeleton are provided.
-
-## Supported images
-
-The following images are currently supported. Each image automatically loads the
-USD asset matching its model (via the `ROBOT_MODEL_NAME` env var), so no extra
-flag is required.
-
-| Tag | Model | Isaac Sim | rby1 core (`feature/isaac-sim`) |
-|-----|-------|-----------|------------|
-| `0.10.7-a_v1.2-isaac6.1.0-r1` | Model A v1.2 | 6.1.0 | df9d04d: hardware velocity estimation, `RBY1_HEADLESS`, lockstep without the core's period wait |
-| `0.10.7-m_v1.2-isaac6.1.0-r1` | Model M v1.2 | 6.1.0 | df9d04d |
-| `0.10.7-a_v1.2-isaac6.1.0` | Model A v1.2 | 6.1.0 | ad75916 |
-| `0.10.7-m_v1.2-isaac6.1.0` | Model M v1.2 | 6.1.0 | ad75916 |
-| `0.10.7-a_v1.2` | Model A v1.2 | 5.1.0 | ad75916 |
-| `0.10.7-m_v1.2` | Model M v1.2 | 5.1.0 | ad75916 |
-
-The joint servo model of `src/` (torque command delays, real-time pacing) is fitted with the `-r1` images. With the
-older images the rby1 core phase-locks the lockstep loop to its own 2 ms clock, SDK clients see stretched state
-intervals under load, and joint impedance steps of the wrist and wrist roll overshoot more than on the robot.
-
-## Docker image tag convention
-
-```
-rainbowroboticsofficial/rby1-sim-isaac:<version>-<model>_v<model_version>[-isaac<isaac_version>][-r<rebuild>]
-
-e.g.) rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0-r1   # Model A v1.2, Isaac Sim 6.1.0, rebuild 1
-      rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2-isaac6.1.0      # Model A v1.2, Isaac Sim 6.1.0
-      rainbowroboticsofficial/rby1-sim-isaac:0.10.7-a_v1.2                 # Model A v1.2, Isaac Sim 5.1.0
-
--r<rebuild>: same release and Isaac Sim version, rebuilt with a newer rby1 core of the feature/isaac-sim branch.
-```
-
-## UDP ports
-
-Since `--network=host` is used, the host and container share the same network namespace.
-Ports `5005/5006` are used by rby1-sdk integration mode; ports `5007/5008` are used by the sim gripper bridge.
-
-| Port | Direction | Description |
-|------|-----------|-------------|
-| `5005/udp` | Isaac Sim → rby1-sdk | RobotState (`ControlState`) |
-| `5006/udp` | rby1-sdk → Isaac Sim | RobotCommand (`ControlInput`) |
-| `5007/udp` | User code → Isaac Sim | Gripper command |
-| `5008/udp` | Isaac Sim → User code | Gripper state |
-
-## Gripper example
-
-When Isaac Sim is running (with `--sim-gripper` enabled by default), you can directly control the gripper from the host.
-
-```bash
-cd examples
-pip install numpy          # dependency
-
-# In IsaacSim
-python3 gripper_example.py --sim
-
-# Real robot
-python3 gripper_example.py
-```
-
-The `SimDynamixelBus` class in `sim_gripper_bridge.py` provides the same interface as `rby1_sdk.DynamixelBus`. By changing just one line (`--sim`), you can control both the real robot and simulation with the same code.
-
-## License
-
-Source files containing the NVIDIA SPDX header are licensed under Apache-2.0.
+시뮬레이터, USD 에셋, SDK 연동은 Rainbow Robotics의 [rby1-sim-isaac](https://github.com/RainbowRobotics/rby1-sim-isaac)에서 왔어. NVIDIA SPDX 헤더가 있는 파일은 Apache-2.0이야(upstream README 참고). 이 fork가 추가한 코드의 라이선스는 아직 정하지 않았어.
