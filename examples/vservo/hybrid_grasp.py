@@ -31,6 +31,7 @@ from sim_gripper_bridge import SimDynamixelBus  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--no-servo", action="store_true", help="skip the image-based step (position-based only), for comparison")
+parser.add_argument("--pause", type=float, default=0.0, help="hold this long [s] after each servo iteration and stage, to watch the viewers")
 args = parser.parse_args()
 
 TOOL = 0.12      # fingertips lie this far beyond the ee frame along -z_ee
@@ -41,6 +42,19 @@ R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # 
 TOOL_DIR = np.array([1.0, 0.0, 0.0])
 TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
 READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])
+
+# servo state for the viewers: the perception node draws it over the camera images (see perception_node.py)
+dbg_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def debug(**info):
+    dbg_tx.sendto(json.dumps(info).encode(), ("127.0.0.1", 5103))
+    time.sleep(args.pause)
+
+
+def px_of(T_cam_from_ee_pt):
+    return (servo.K @ T_cam_from_ee_pt)[:2] / T_cam_from_ee_pt[2]
+
 
 # latest perception message (UDP from perception_node.py)
 msg = {"t": 0.0, "data": None}
@@ -137,6 +151,7 @@ box_R = np.array(est[-1]["box"]["R"])
 box_t = np.mean([m["box"]["t"] for m in est], axis=0)
 print(f"stereo box estimate {np.round(box_t, 3)} ({est[-1]['box']['n']} landmarks)", flush=True)
 cmd_tip = box_t - [BACK, 0, 0]  # the commanded tip; the steps accumulate here, not on the measured tip, because the position
+debug(stage="pre-grasp: position-based move to the stereo estimate")
 print("pre-grasp:", move_ee(cmd_tip, 4.0), flush=True)  # loop's steady-state offset would otherwise be added again every step
 
 # 3. image-based fine alignment with the wrist camera
@@ -149,6 +164,12 @@ for i in range(0 if args.no_servo else 10):
     if centre is None:
         print("  no landmark in the wrist camera; keeping the position-based pose", flush=True)
         break
+    ee_to_cam = np.linalg.inv(servo.CAM_IN_EE)
+    pred = servo.predicted_landmarks(servo.cam_pose(T_ee), box_R, box_t)[0]
+    debug(stage="image-based alignment", iter=i, err_mm=[centre[0] * 1000, centre[1] * 1000], depth_cm=Z * 100,
+          pred=pred.tolist(), matched=[[k, float(p[0]), float(p[1])] for k, p in servo.match_landmarks(blobs, pred)],
+          centre_px=px_of((ee_to_cam @ np.r_[centre, 1])[:3]).tolist(),                         # where the box centre is
+          goal_px=px_of((ee_to_cam @ np.r_[0.0, 0.0, centre[2], 1])[:3]).tolist())              # where it must be: on the tool line
     print(f"  iter {i}: box centre in the hand frame ({centre[0] * 1000:5.1f}, {centre[1] * 1000:5.1f}, {centre[2] * 1000:6.1f}) mm, "
           f"{n} landmarks, camera depth {Z * 100:.1f} cm", flush=True)
     if np.hypot(centre[0], centre[1]) < CONVERGED_M:
@@ -163,9 +184,13 @@ else:                   # no image: the stereo estimate
     advance = box_t[0] + 0.005 - cmd_tip[0]
 advance = float(np.clip(advance, 0.0, BACK + 0.05))
 cmd_tip = cmd_tip + advance * TOOL_DIR
+debug(stage=f"advance {advance * 100:.1f} cm along the tool axis")
 print(f"advance {advance * 100:.1f} cm:", move_ee(cmd_tip, 3.0), flush=True)
+debug(stage="grasp")
 gripper.set_closed()
 time.sleep(2.0)
+debug(stage="lift")
 print("lift:", move_ee(cmd_tip + LIFT, 4.0), flush=True)
+debug(stage="done")
 time.sleep(1.0)
 gripper.stop()

@@ -37,22 +37,16 @@ Visualization Manager:
         Value: /rby1/scene_markers
         Reliability Policy: Reliable
     - Class: rviz_default_plugins/Image
-      Name: stereo_right
+      Name: servo debug - wrist camera
       Enabled: true
       Topic:
-        Value: /rby1/stereo_right/image_raw
+        Value: /rby1/servo_debug/wrist_right
         Reliability Policy: Reliable
     - Class: rviz_default_plugins/Image
-      Name: wrist_left
+      Name: servo debug - stereo
       Enabled: true
       Topic:
-        Value: /rby1/wrist_left/image_raw
-        Reliability Policy: Reliable
-    - Class: rviz_default_plugins/Image
-      Name: wrist_right
-      Enabled: true
-      Topic:
-        Value: /rby1/wrist_right/image_raw
+        Value: /rby1/servo_debug/stereo_right
         Reliability Policy: Reliable
   Global Options:
     Fixed Frame: world
