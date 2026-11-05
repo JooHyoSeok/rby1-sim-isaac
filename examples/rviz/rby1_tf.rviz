@@ -28,6 +28,9 @@ Visualization Manager:
     Fixed Frame: link_torso_5
     Frame Rate: 30
   Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Interact
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
