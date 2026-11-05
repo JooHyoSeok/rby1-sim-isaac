@@ -33,7 +33,14 @@ examples/gui/rbyctl.py move blue right         # 파란 상자를 집어서 빈 
 examples/gui/rbyctl.py pick yellow             # place, place-on, home, abort ... 은 --help
 ```
 
-GUI에서는 이렇게 써(GUI의 pick은 파란 상자를 집어):
+말로도 시킬 수 있어. 언어 모델(`claude -p`, 기본 Haiku 5.5, 계획이 틀리면 Sonnet 5.5)이 보이는 상자 상태(텍스트)를 보고 계획을 JSON으로 짜고, 실행기가 서보잉으로 해. 모델은 명령당 한두 번만 불리고 이미지는 안 보내(한 번에 약 4~6초, 정가 기준 $0.0003~0.0004). 서보 루프(20Hz)에는 모델이 없어:
+
+```bash
+examples/llm/planner.py "상자 3개 쌓아"                           # 계획을 세우고 바로 실행
+examples/llm/planner.py "stack all boxes, blue at the bottom" --scene default --dry-run   # 시뮬 없이 계획만 보기
+```
+
+GUI에도 "tell the robot" 입력창이 있어(같은 플래너). GUI에서는 이렇게 써(GUI의 pick은 파란 상자를 집어):
 
 1. 지도에서 주황 상자나 파란 "place here" 표시를 **끌어서** 옮겨. 팔이 닿을 수 있는 곳(초록)으로 자동으로 붙어. 상자 위에서 휠을 돌리면 방향이 돌아가.
 2. `pick`을 누르면 로봇이 준비 자세를 잡은 뒤 서보잉으로 상자를 집어서 들어올려. `place`는 들고 있는 상자를 파란 표시 위치에 내려놓고, `pick and place`는 둘을 이어서 해.
@@ -61,6 +68,7 @@ GUI에서는 이렇게 써(GUI의 pick은 파란 상자를 집어):
 | 위치 | 내용 |
 |---|---|
 | `src/rby1_vision.py` | 카메라, landmark, 테이블, 물리 상자, 충돌 형상, ROS 2 발행, 실행 중 장면 명령 (`--vision` 옵션) |
+| `examples/llm/` | 말 → 로봇 기술 플래너(`planner.py`): 장면을 텍스트로 모델에 주고, 계획을 검사해서 실행기에 보냄 |
 | `examples/gui/` | 관제 GUI, 실행기 서비스(`grasp_core.py`, `servo_server.py`), 명령줄 `rbyctl.py`, 한 줄 실행 `run_gui.sh`, 오프라인 시험 |
 | `examples/vservo/` | 인식(`vision.py`), 서보 제어(`servo.py`), 한 번 실행 `run_demo.sh`, 시험 |
 | `examples/grasp/` | 서보 없이 위치 제어로 집는 최소 예제 |
@@ -90,6 +98,7 @@ GUI에서는 이렇게 써(GUI의 pick은 파란 상자를 집어):
 ```bash
 QT_QPA_PLATFORM=offscreen /usr/bin/python3 examples/gui/test_offline.py   # GUI, 지도, 실행기 명령 처리 (가짜 로봇)
 /usr/bin/python3 examples/vservo/test_servo.py                            # 서보 제어식 (핀홀 카메라 모의)
+/usr/bin/python3 examples/llm/test_planner.py                              # 말 플래너 (가짜 모델, 가짜 로봇)
 /usr/bin/python3 examples/vservo/test_boxes.py                            # 색깔별 상자 3개 인식, 쌓인 상태 포함 (가짜 스테레오 영상)
 ```
 

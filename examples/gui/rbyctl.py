@@ -35,9 +35,9 @@ def send(msg, port):
     tx.close()
 
 
-def ask(msg, timeout, quiet=False):
+def ask(msg, timeout, quiet=False, log=None):
     """Send a command to the executor with a reply port and return its final message ({"type": "result"|"scene", ...}) or None. The log
-    lines of the job are printed on the way (stderr when quiet)."""
+    lines of the job are printed on the way (stderr when quiet), or passed to `log` when given."""
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind((HOST, 0))
     rx.settimeout(0.5)
@@ -53,7 +53,10 @@ def ask(msg, timeout, quiet=False):
                 continue
             heard = True
             if m["type"] == "log":
-                print(m["text"], file=sys.stderr if quiet else sys.stdout, flush=True)
+                if log is not None:
+                    log(m["text"])
+                else:
+                    print(m["text"], file=sys.stderr if quiet else sys.stdout, flush=True)
             else:
                 return m
     except KeyboardInterrupt:

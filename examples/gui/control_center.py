@@ -6,12 +6,14 @@
   cameras     the wrist and stereo views with the servo overlay, and the left-side raw views (ros_bridge.py)
   scene map   click or drag to put the box, the place target or the table where you want them (scene_map.py)
   scene       box / table numbers, sent to the simulator over UDP (src/rby1_vision.py poll_commands)
+  tell the robot   a text box: a language model plans what you typed (examples/llm/planner.py), the executor does it
   tasks       pick (visual servoing), place, pick & place, home, gripper, ABORT: sent to the executor service (servo_server.py)
   robot       all joint positions and the executor's status
 
 NOT RUN YET against a simulator (see grasp_core.py); the window, the map and the commands are covered by test_offline.py.
 """
 import json
+import os
 import socket
 import sys
 import time
@@ -22,6 +24,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import scene_config as C
 from scene_map import SceneMap
 
+PLANNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "llm", "planner.py")
 CAMERAS = [("wrist overlay", "wrist camera (back of the hand) + servo overlay"), ("stereo overlay", "stereo + box pose"),
            ("wrist left", "left wrist camera (raw)"), ("stereo left", "left stereo camera (raw)")]
 
@@ -64,9 +67,11 @@ def spin(value, lo, hi, step=0.01, decimals=3, suffix=" m"):
 
 class ControlCenter(QtWidgets.QMainWindow):
     def __init__(self, bridge, scene_addr=("127.0.0.1", C.PORT_SCENE), exec_addr=("127.0.0.1", C.PORT_EXEC_CMD),
-                 status_port=C.PORT_EXEC_STATUS):
+                 status_port=C.PORT_EXEC_STATUS, planner_cmd=None):
         super().__init__()
         self.bridge, self.scene_addr, self.exec_addr = bridge, scene_addr, exec_addr
+        self.planner_cmd = planner_cmd or [sys.executable, "-u", PLANNER]   # the typed text (and --dry-run) are appended
+        self.planner, self._planner_buf = QtCore.QProcess(self), b""
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx.bind(("127.0.0.1", status_port))
@@ -152,6 +157,31 @@ class ControlCenter(QtWidgets.QMainWindow):
         sv.addWidget(precise)
         rv.addWidget(scene)
 
+        talk = QtWidgets.QGroupBox("tell the robot (a language model plans it, the robot does it)")
+        tk = QtWidgets.QGridLayout(talk)
+        self.say_edit = QtWidgets.QLineEdit()
+        self.say_edit.setPlaceholderText("e.g.  상자 3개 쌓아   /   파란 걸 오른쪽에 놔   /   stack the boxes with yellow at the bottom")
+        self.say_edit.returnPressed.connect(self.do_say)
+        self.say_go = QtWidgets.QPushButton("go")
+        self.say_go.clicked.connect(self.do_say)
+        self.say_plan_only = QtWidgets.QCheckBox("plan only (show the plan, do not move)")
+        self.say_plan_only.toggled.connect(lambda _: self._enable_buttons())
+        self.robot_says = QtWidgets.QLabel("")
+        self.robot_says.setWordWrap(True)
+        self.robot_says.setStyleSheet("font-weight: bold;")
+        tk.addWidget(self.say_edit, 0, 0)
+        tk.addWidget(self.say_go, 0, 1)
+        tk.addWidget(self.say_plan_only, 1, 0, 1, 2)
+        tk.addWidget(self.robot_says, 2, 0, 1, 2)
+        self.planner.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        self.planner.setProcessEnvironment(env)
+        self.planner.readyReadStandardOutput.connect(self._planner_output)
+        self.planner.finished.connect(self._planner_done)
+        self.planner.errorOccurred.connect(lambda _: self.say(f"could not start the planner: {self.planner.errorString()}"))
+        rv.addWidget(talk)
+
         tasks = QtWidgets.QGroupBox("tasks (executor)")
         tg = QtWidgets.QGridLayout(tasks)
         self.target_label = QtWidgets.QLabel("place target: drag the blue square on the map")
@@ -170,7 +200,7 @@ class ControlCenter(QtWidgets.QMainWindow):
             self.buttons[key] = b
         stop = QtWidgets.QPushButton("ABORT")
         stop.setStyleSheet("background: #c0392b; color: white; font-weight: bold;")
-        stop.clicked.connect(lambda: self.send_exec({"cmd": "abort"}))
+        stop.clicked.connect(self.do_abort)
         tg.addWidget(stop, 1, 3, 2, 2)
         rv.addWidget(tasks)
 
@@ -241,6 +271,7 @@ class ControlCenter(QtWidgets.QMainWindow):
         self.buttons["home"].setEnabled(ok and not busy and not holding)
         self.buttons["open"].setEnabled(ok and not busy)
         self.buttons["close"].setEnabled(ok and not busy)
+        self.say_go.setEnabled(self.planner.state() == QtCore.QProcess.NotRunning and (ok or self.say_plan_only.isChecked()))
 
     # ---- scene -------------------------------------------------------------------------------------------------------
     def _table(self):
@@ -347,6 +378,49 @@ class ControlCenter(QtWidgets.QMainWindow):
                  f"is in the way of that move (needs >= {C.SEED_EDGE_X} m): move the table back first, or tick 'allow ...'")
         return False
 
+    def do_say(self):
+        """Hand the typed sentence to the planner (a child process: it asks the language model, then drives the executor like rbyctl)."""
+        text, dry = self.say_edit.text().strip(), self.say_plan_only.isChecked()
+        if not text or self.planner.state() != QtCore.QProcess.NotRunning:
+            return
+        if not dry and (not self._connected() or not self._seed_ok()):
+            if not self._connected():
+                self.say("not sent: the executor is not connected")
+            return
+        self.say(f"you: {text}")
+        self.robot_says.setText("thinking ...")
+        self._planner_buf = b""
+        self.planner.start(self.planner_cmd[0], self.planner_cmd[1:] + [text, "--no-exec-log"] + (["--dry-run"] if dry else []))   # the log comes from the executor itself
+        self._enable_buttons()
+
+    def _planner_output(self):
+        self._planner_buf += bytes(self.planner.readAllStandardOutput())
+        *lines, self._planner_buf = self._planner_buf.split(b"\n")
+        for raw in lines:
+            self._planner_line(raw.decode("utf-8", "replace").rstrip())
+
+    def _planner_line(self, line):
+        if line.startswith("robot:"):
+            self.robot_says.setText(line[len("robot:"):].strip() or "...")
+        if line:
+            self.say(line)
+
+    def _planner_done(self, code, _status):
+        if self._planner_buf.strip():
+            self._planner_line(self._planner_buf.decode("utf-8", "replace").rstrip())
+        self._planner_buf = b""
+        if code != 0:
+            self.say(f"the planner stopped (exit {code})")
+        if self.robot_says.text() == "thinking ...":
+            self.robot_says.setText("")
+        self._enable_buttons()
+
+    def do_abort(self):
+        self.send_exec({"cmd": "abort"})
+        if self.planner.state() != QtCore.QProcess.NotRunning:   # also stop the plan: it must not start the next step
+            self.planner.terminate()
+            self.say("plan stopped")
+
     def do_pick(self):
         if self._seed_ok():
             self.send_exec({"cmd": "pick", "use_image": self.use_image.isChecked()})
@@ -403,6 +477,8 @@ class ControlCenter(QtWidgets.QMainWindow):
             self.joints.resizeColumnsToContents()   # once the values are in, so the columns fit them
 
     def closeEvent(self, ev):
+        if self.planner.state() != QtCore.QProcess.NotRunning:
+            self.planner.kill()
         self.bridge.close()
         super().closeEvent(ev)
 

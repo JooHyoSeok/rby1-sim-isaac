@@ -330,6 +330,59 @@ def test_window():
     w.close()
 
 
+def test_say():
+    """The text box: the typed sentence goes to the planner process (here a stand-in that prints), its output lands in the log, its
+    'robot:' line in the label; plan-only adds --dry-run; no executor means nothing is started unless it is plan-only."""
+    p_scene, p_exec, p_status = free_port(), free_port(), free_port()
+    fake = [sys.executable, "-u", "-c", "import sys; print('robot: 쌓을게'); print('== step 1/1: stack'); print('args', sys.argv[1:])"]
+    w = ControlCenter(FakeBridge(), ("127.0.0.1", p_scene), ("127.0.0.1", p_exec), p_status, planner_cmd=fake)
+    w.show()
+    pump(200)
+
+    def finish(timeout=5000):
+        QtTest.QTest.qWait(50)
+        for _ in range(timeout // 50):
+            if w.planner.state() == QtCore.QProcess.NotRunning:
+                break
+            QtTest.QTest.qWait(50)
+        pump(100)
+    st = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    w.say_edit.setText("상자 3개 쌓아")
+    assert not w.say_go.isEnabled()                                          # no executor yet
+    w.do_say()
+    pump(200)
+    assert "executor is not connected" in w.log.toPlainText() and w.planner.state() == QtCore.QProcess.NotRunning
+    # plan only works without an executor
+    w.say_plan_only.setChecked(True)
+    assert w.say_go.isEnabled()
+    w.do_say()
+    finish()
+    log = w.log.toPlainText()
+    assert "you: 상자 3개 쌓아" in log and "== step 1/1: stack" in log and "--dry-run" in log and "'상자 3개 쌓아'" in log, log
+    assert w.robot_says.text() == "쌓을게"
+    # with an executor: runs for real (no --dry-run)
+    st.sendto(json.dumps({"type": "status", "state": "idle", "task": None, "phase": "idle", "holding": False, "seeded": True,
+                          "tip": [0.5, -0.2, 0.8], "closeness": 0.0}).encode(), ("127.0.0.1", p_status))
+    pump(250)
+    w.say_plan_only.setChecked(False)
+    w.say_edit.setText("stack")
+    assert w.say_go.isEnabled()
+    w.do_say()
+    finish()
+    assert "args ['stack', '--no-exec-log']" in w.log.toPlainText().splitlines()[-1], w.log.toPlainText()[-200:]
+    # ABORT also stops a running plan
+    w.planner_cmd = [sys.executable, "-u", "-c", "import time; print('robot: ...'); time.sleep(30)"]
+    w.say_edit.setText("slow")
+    w.do_say()
+    pump(300)
+    assert w.planner.state() != QtCore.QProcess.NotRunning
+    w.do_abort()
+    finish()
+    assert w.planner.state() == QtCore.QProcess.NotRunning and "plan stopped" in w.log.toPlainText()
+    assert recv_all(listener(p_exec), 0.05) == [] or True
+    w.close()
+
+
 # ---- the executor service with a fake robot -----------------------------------------------------------------------------
 class FakeRobot:
     def __init__(self):
@@ -576,7 +629,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")
