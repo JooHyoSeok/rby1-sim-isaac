@@ -107,10 +107,9 @@ def draw_wrist(img, blobs):
         cv2.arrowedLine(out, tuple(int(x) for x in d["centre_px"]), tuple(int(x) for x in d["goal_px"]), (255, 0, 255), 2, tipLength=0.15)
         cv2.circle(out, tuple(int(x) for x in d["centre_px"]), 10, (255, 0, 255), 2)
         cross(out, d["goal_px"], 14, (255, 0, 0))
-    lines = [d.get("stage", "waiting for the executor")]
-    if "err_mm" in d:
-        lines += [f"iteration {d['iter']}: error {d['err_mm'][0]:+.1f} / {d['err_mm'][1]:+.1f} mm, camera depth {d['depth_cm']:.1f} cm",
-                  "magenta: measured box centre   red +: where it must be (tool line)"]
+    lines = list(d["text"]) if "text" in d else [d.get("stage", "waiting for the executor")]
+    if "centre_px" in d:
+        lines.append(f"camera depth {d['depth_cm']:.1f} cm   magenta: measured box centre   red +: where it must be (tool line)")
     text(out, lines)
     return out
 
