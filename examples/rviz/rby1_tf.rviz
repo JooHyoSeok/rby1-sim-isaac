@@ -1,0 +1,38 @@
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: RBY1 links
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 0.15
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+    - Class: rviz_default_plugins/Image
+      Name: stereo_left
+      Enabled: true
+      Topic:
+        Value: /rby1/stereo_left/image_raw
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: wrist_left
+      Enabled: true
+      Topic:
+        Value: /rby1/wrist_left/image_raw
+        Reliability Policy: Reliable
+  Global Options:
+    Fixed Frame: link_torso_5
+    Frame Rate: 30
+  Name: root
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.0
+      Focal Point: {X: 0, Y: 0, Z: -0.6}
+      Pitch: 0.4
+      Yaw: 2.4
+    Saved: ~

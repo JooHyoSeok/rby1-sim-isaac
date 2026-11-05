@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 ROBOT_ROOT = "/World/RBY1"
 WRIST_LINKS = {"left": "link_left_arm_6", "right": "link_right_arm_6"}
@@ -129,7 +129,18 @@ def build_scene(stage) -> dict[str, str]:
     return cams
 
 
-def build_ros_graph(cams: dict[str, str]) -> None:
+def robot_links(stage) -> list[str]:
+    """Prim paths of every body linked by a physics joint (arm, torso, head, wheels, gripper), for RViz."""
+    bodies = set()
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(ROBOT_ROOT)):
+        if prim.IsA(UsdPhysics.Joint):
+            j = UsdPhysics.Joint(prim)
+            for rel in (j.GetBody0Rel(), j.GetBody1Rel()):
+                bodies.update(str(t) for t in rel.GetTargets())
+    return sorted(bodies)
+
+
+def build_ros_graph(cams: dict[str, str], stage) -> None:
     """One execution graph: clock, joint states, GT transforms, and image + camera_info per camera."""
     import omni.graph.core as og
     import usdrt.Sdf
@@ -156,7 +167,16 @@ def build_ros_graph(cams: dict[str, str]) -> None:
         "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
         "sensorTime")]
     gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()]  # PoseTree only accepts rigid bodies
-    values = [
+    values = []
+    # /tf: link poses for RViz. Isaac publishes the flat RBY1 -> link frames AND the articulation chain (rooted at
+    # link_torso_5); examples/rviz/tf_chain_relay.py keeps only the chain, which is a proper tree.
+    links = robot_links(stage)
+    nodes.append(("Tf", "isaacsim.ros2.bridge.ROS2PublishTransformTree"))
+    conn += [("Tick.outputs:tick", "Tf.inputs:execIn"), ("Context.outputs:context", "Tf.inputs:context"),
+             ("SimTime.outputs:simulationTime", "Tf.inputs:timeStamp")]
+    values += [("Tf.inputs:parentPrim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
+               ("Tf.inputs:targetPrims", [usdrt.Sdf.Path(p) for p in links])]
+    values += [
         ("ReadJoints.inputs:prim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
         ("PubJoints.inputs:topicName", "rby1/joint_states"),
         ("GtTf.inputs:parentPrim", [usdrt.Sdf.Path(ROBOT_ROOT)]),
@@ -226,6 +246,6 @@ def setup(stage_getter) -> None:
     enable_extension("isaacsim.ros2.bridge")
     stage = stage_getter()
     cams = build_scene(stage)
-    build_ros_graph(cams)
+    build_ros_graph(cams, stage)
     write_gt(stage, os.environ.get("RBY1_GT_PATH", "/isaac-sim/.local/share/ov/data/rby1_gt.json"))
     print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")
