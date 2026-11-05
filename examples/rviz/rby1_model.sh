@@ -2,7 +2,7 @@
 # RBY1 model in RViz, driven by the simulator's /rby1/joint_states (start the sim with docker/run_sdk.sh ... --vision).
 #   ./rby1_model.sh export   one-off: USD -> URDF + meshes (headless Isaac Sim in the sim image, ~1 min)
 #   ./rby1_model.sh view     robot_state_publisher + RViz (host ROS 2 Jazzy, display $DISPLAY)
-# The URDF has no materials (links render white). TF goes to /tf_urdf because the sim's own /tf uses the same
+# Colors come from the exported mtl files. TF goes to /tf_urdf because the sim's own /tf uses the same
 # frame names with a different tree.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +18,8 @@ export)
         -v "${H}/cache/kit:/isaac-sim/kit/cache:rw" -v "${H}/logs:/isaac-sim/.nvidia-omniverse/logs:rw" \
         -v "${H}/config:/isaac-sim/.nvidia-omniverse/config:rw" -v "${H}/data:/isaac-sim/.local/share/ov/data:rw" "${IMAGE}" \
         -c '/isaac-sim/python.sh /isaac-sim/standalone_examples/api/isaacsim.asset.exporter.urdf/urdf_export.py --usd-path /a/model_v_1_2_a.usd --output-dir /isaac-sim/.local/share/ov/data/rby1_urdf'
+    # the mtl files export Ke=1 (emissive white), which RViz renders as flat white links
+    sed -i 's/^Ke .*/Ke 0.000000 0.000000 0.000000/' "${OUT}"/meshes/*.mtl
     # floating base -> fixed, absolute mesh paths, and the velocity/effort every <limit> needs
     python3 - "${OUT}" <<'PY'
 import re, sys

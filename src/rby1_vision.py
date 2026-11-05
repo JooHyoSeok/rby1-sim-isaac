@@ -8,7 +8,7 @@ in a rendered frame and tune (the wrist camera and EE landmark poses depend on t
 ROS 2 topics (sim-time stamped, published at the render rate, so pass ``--render-hz`` when headless):
   /clock, /rby1/joint_states
   /rby1/{stereo_left,stereo_right,wrist_left,wrist_right}/image_raw and /camera_info
-  /rby1/gt/tf   ground-truth wrist link poses w.r.t. the robot root (evaluation only)
+  /rby1/gt/tf   ground-truth wrist link and object poses w.r.t. the robot root (evaluation only)
   rby1_gt.json  ground-truth fixed poses: stereo cameras, wrist camera and landmark offsets, object, targets
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ FOCAL_MM, H_APERTURE_MM = 15.0, 20.955  # fx = IMAGE_W * FOCAL_MM / H_APERTURE_M
 
 # External stereo rig: eye centre, look-at point, baseline. Override with RBY1_STEREO_EYE="x,y,z".
 STEREO_EYE = np.array([float(v) for v in os.environ.get("RBY1_STEREO_EYE", "1.4,0.0,1.2").split(",")])
-STEREO_TARGET = np.array([0.5, 0.0, 0.9])
+STEREO_TARGET = np.array([0.5, 0.0, 1.0])
 STEREO_BASELINE = 0.12
 
 # Wrist camera pose in the wrist link frame: (translation, look direction, up). The tool points along -z of the
@@ -41,13 +41,17 @@ SPHERE_R = 0.012
 # Asymmetric red landmarks P1..P4 in the wrist link frame (P1 is the single sphere for eye-to-hand calibration).
 EE_LANDMARKS = [(0.04, 0.0, 0.05), (-0.04, 0.03, 0.06), (0.0, -0.05, 0.08), (0.03, 0.05, 0.10)]
 # Table, object, object landmarks Q1..Q4 (object frame) and the R/B/Y calibration target (table frame, on top).
-TABLE_CENTER, TABLE_SIZE = (0.6, 0.0, 0.35), (0.5, 0.8, 0.7)
-OBJECT_POS, OBJECT_SIZE = (0.55, -0.15, 0.7 + 0.04), (0.08, 0.08, 0.08)  # centre of the cube resting on the table
-OBJECT_LANDMARKS = [(0.0, 0.0, 0.06), (0.05, 0.0, 0.0), (-0.03, 0.05, 0.0), (-0.03, -0.05, 0.0)]
-TARGET_SPHERES = {"R": ((0.65, 0.25, 0.7 + SPHERE_R), (1, 0, 0)),
-                  "B": ((0.75, 0.30, 0.7 + SPHERE_R), (0, 0, 1)),
-                  "Y": ((0.70, 0.18, 0.7 + SPHERE_R), (1, 1, 0)),
-                  "R2": ((0.80, 0.20, 0.7 + SPHERE_R + 0.03), (1, 0, 0))}  # 4th, off-plane: removes P3P ambiguity
+# The shoulders are at z=1.37 and an arm reaches ~0.53 m, so the table top is high (1.05) to keep the arms bent.
+TABLE_TOP = 1.05
+TABLE_CENTER, TABLE_SIZE = (0.8, 0.0, TABLE_TOP / 2), (0.6, 0.8, TABLE_TOP)
+OBJECT_SIZE = (0.05, 0.05, 0.08)  # tall enough to be grasped above the table surface
+OBJECT_POS = (0.62, -0.20, TABLE_TOP + OBJECT_SIZE[2] / 2)  # centre of the cube resting on the table
+OBJECT_MASS, OBJECT_FRICTION = 0.1, 1.5  # a dynamic rigid body the gripper can lift
+OBJECT_LANDMARKS = [(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.037, 0.0), (-0.02, -0.037, 0.0)]
+TARGET_SPHERES = {"R": ((0.65, 0.25, TABLE_TOP + SPHERE_R), (1, 0, 0)),
+                  "B": ((0.75, 0.30, TABLE_TOP + SPHERE_R), (0, 0, 1)),
+                  "Y": ((0.70, 0.18, TABLE_TOP + SPHERE_R), (1, 1, 0)),
+                  "R2": ((0.80, 0.20, TABLE_TOP + SPHERE_R + 0.03), (1, 0, 0))}  # 4th, off-plane: removes P3P ambiguity
 
 
 def _material(stage, path: str, rgb) -> UsdShade.Material:
@@ -94,6 +98,37 @@ def _camera(stage, path: str, matrix: Gf.Matrix4d) -> None:
     cam.AddTransformOp().Set(matrix)
 
 
+def _friction_material(stage) -> UsdShade.Material:
+    """High-friction physics material shared by the object and the gripper fingers (PhysX averages the two)."""
+    mat = UsdShade.Material.Define(stage, "/World/Looks/object_physics")
+    phys = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
+    phys.CreateStaticFrictionAttr(OBJECT_FRICTION)
+    phys.CreateDynamicFrictionAttr(OBJECT_FRICTION)
+    phys.CreateRestitutionAttr(0.0)
+    return mat
+
+
+def add_gripper_colliders(stage) -> None:
+    """The robot USDs ship without collision geometry on the wrist link and the whole gripper, so the hand passes
+    through the table and the object. Give those meshes convex-hull colliders and the high-friction material."""
+    friction = _friction_material(stage)
+    roots = [f"{ROBOT_ROOT}/{n}" for n in (*WRIST_LINKS.values(), "left_gripper", "right_gripper")]
+    for _ in range(4):  # meshes inside instanceable prims cannot be edited: un-instance (nested instances need passes)
+        for root in roots:
+            for prim in Usd.PrimRange(stage.GetPrimAtPath(root)):
+                if prim.IsInstance():
+                    prim.SetInstanceable(False)
+    count = 0
+    for root in roots:
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(root)):
+            if prim.IsA(UsdGeom.Mesh):
+                UsdPhysics.CollisionAPI.Apply(prim)
+                UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("convexHull")
+                UsdShade.MaterialBindingAPI.Apply(prim).Bind(friction, UsdShade.Tokens.weakerThanDescendants, "physics")
+                count += 1
+    print(f"[Vision] {count} gripper/wrist meshes got convex-hull colliders")
+
+
 def build_scene(stage) -> dict[str, str]:
     """Create cameras, landmarks, table and object. Returns {topic name: camera prim path}."""
     red = _material(stage, "/World/Looks/red", (1, 0, 0))
@@ -119,9 +154,14 @@ def build_scene(stage) -> dict[str, str]:
             _sphere(stage, f"{ROBOT_ROOT}/{link}/P{i}", p, (1, 0, 0), red)
 
     _cuboid(stage, "/World/Table", TABLE_CENTER, TABLE_SIZE, (0.6, 0.5, 0.4), static_collider=True)
-    UsdGeom.Xform.Define(stage, "/World/Object")  # unscaled parent so the landmark spheres stay round
-    UsdGeom.XformCommonAPI(UsdGeom.Xform(stage.GetPrimAtPath("/World/Object"))).SetTranslate(Gf.Vec3d(*OBJECT_POS))
-    _cuboid(stage, "/World/Object/body", (0, 0, 0), OBJECT_SIZE, (0.8, 0.8, 0.8), static_collider=False)
+    friction = _friction_material(stage)
+    obj = UsdGeom.Xform.Define(stage, "/World/Object")  # unscaled parent so the landmark spheres stay round
+    UsdGeom.XformCommonAPI(obj).SetTranslate(Gf.Vec3d(*OBJECT_POS))
+    _cuboid(stage, "/World/Object/body", (0, 0, 0), OBJECT_SIZE, (0.8, 0.8, 0.8), static_collider=True)
+    UsdPhysics.RigidBodyAPI.Apply(obj.GetPrim())
+    UsdPhysics.MassAPI.Apply(obj.GetPrim()).CreateMassAttr(OBJECT_MASS)
+    UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath("/World/Object/body")).Bind(
+        friction, UsdShade.Tokens.weakerThanDescendants, "physics")
     for i, p in enumerate(OBJECT_LANDMARKS, 1):
         _sphere(stage, f"/World/Object/Q{i}", p, (1, 0, 0), red)
     for name, (p, rgb) in TARGET_SPHERES.items():
@@ -166,7 +206,7 @@ def build_ros_graph(cams: dict[str, str], stage) -> None:
     conn += [(f"ReadJoints.outputs:{a}", f"PubJoints.inputs:{a}") for a in (
         "jointNames", "jointPositions", "jointVelocities", "jointEfforts", "jointDofTypes", "stageMetersPerUnit",
         "sensorTime")]
-    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()]  # PoseTree only accepts rigid bodies
+    gt_targets = [f"{ROBOT_ROOT}/{l}" for l in WRIST_LINKS.values()] + ["/World/Object"]  # rigid bodies only
     values = []
     # /tf: link poses for RViz. Isaac publishes the flat RBY1 -> link frames AND the articulation chain (rooted at
     # link_torso_5); examples/rviz/tf_chain_relay.py keeps only the chain, which is a proper tree.
@@ -246,6 +286,7 @@ def setup(stage_getter) -> None:
     enable_extension("isaacsim.ros2.bridge")
     stage = stage_getter()
     cams = build_scene(stage)
+    add_gripper_colliders(stage)
     build_ros_graph(cams, stage)
     write_gt(stage, os.environ.get("RBY1_GT_PATH", "/isaac-sim/.local/share/ov/data/rby1_gt.json"))
     print(f"[Vision] cameras {list(cams)} at {IMAGE_W}x{IMAGE_H}, ROS 2 topics under /rby1")

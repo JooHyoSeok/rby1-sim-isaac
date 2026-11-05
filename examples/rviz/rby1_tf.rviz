@@ -24,6 +24,18 @@ Visualization Manager:
       Topic:
         Value: /rby1/wrist_left/image_raw
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: stereo_right
+      Enabled: true
+      Topic:
+        Value: /rby1/stereo_right/image_raw
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: wrist_right
+      Enabled: true
+      Topic:
+        Value: /rby1/wrist_right/image_raw
+        Reliability Policy: Reliable
   Global Options:
     Fixed Frame: link_torso_5
     Frame Rate: 30
