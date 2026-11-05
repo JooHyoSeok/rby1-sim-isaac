@@ -1,260 +1,53 @@
-Panels:
-  []
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.5
-      Cell Size: 1
-      Class: rviz_default_plugins/Grid
-      Color: 160; 160; 164
-      Enabled: true
-      Line Style:
-        Line Width: 0.029999999329447746
-        Value: Lines
+    - Class: rviz_default_plugins/Grid
       Name: Grid
-      Normal Cell Count: 0
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Plane: XY
-      Plane Cell Count: 10
-      Reference Frame: <Fixed Frame>
-      Value: true
-    - Alpha: 1
-      Class: rviz_default_plugins/RobotModel
-      Collision Enabled: false
-      Description File: ""
+      Enabled: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: RBY1
+      Enabled: true
       Description Source: Topic
       Description Topic:
-        Depth: 5
-        Durability Policy: Transient Local
-        History Policy: Keep Last
-        Reliability Policy: Reliable
         Value: /robot_description
-      Enabled: true
-      Links:
-        All Links Enabled: true
-        Expand Joint Details: false
-        Expand Link Details: false
-        Expand Tree: false
-        Link Tree Style: Links in Alphabetic Order
-        base:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_head_0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_head_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_head_2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_4:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_left_arm_6:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_4:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_right_arm_6:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_4:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        link_torso_5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wheel_l:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wheel_r:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        world:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-      Mass Properties:
-        Inertia: false
-        Mass: false
-      Name: RBY1
-      TF Prefix: ""
-      Update Interval: 0
-      Value: true
-      Visual Enabled: true
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: stereo_left
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
+        Durability Policy: Transient Local
         Reliability Policy: Reliable
-        Value: /rby1/stereo_left/image_raw
-      Value: true
-    - Class: rviz_default_plugins/Image
+    - Class: rviz_default_plugins/MarkerArray
+      Name: table and box
       Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
+      Topic:
+        Value: /rby1/scene_markers
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: stereo_right
+      Enabled: true
+      Topic:
+        Value: /rby1/stereo_right/image_raw
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
       Name: wrist_left
-      Normalize Range: true
+      Enabled: true
       Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
         Value: /rby1/wrist_left/image_raw
-      Value: true
-  Enabled: true
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: wrist_right
+      Enabled: true
+      Topic:
+        Value: /rby1/wrist_right/image_raw
+        Reliability Policy: Reliable
   Global Options:
-    Background Color: 48; 48; 48
     Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Interact
-      Hide Inactive Objects: true
-  Transformation:
-    Current:
-      Class: rviz_default_plugins/TF
-  Value: true
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.5554072856903076
-      Enable Stereo Rendering:
-        Stereo Eye Separation: 0.05999999865889549
-        Stereo Focal Distance: 1
-        Swap Stereo Eyes: false
-        Value: false
-      Focal Point:
-        X: 0.17344364523887634
-        Y: 0.022291477769613266
-        Z: 0.8390488624572754
-      Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05000000074505806
-      Invert Z Axis: false
-      Name: Current View
-      Near Clip Distance: 0.009999999776482582
-      Pitch: 0.13000023365020752
-      Target Frame: <Fixed Frame>
-      Value: Orbit (rviz_default_plugins)
-      Yaw: 0.029991529881954193
+      Distance: 2.4
+      Focal Point: {X: 0.4, Y: 0, Z: 0.7}
+      Pitch: 0.35
+      Yaw: 0.9
     Saved: ~
-Window Geometry:
-  Height: 1164
-  Hide Left Dock: false
-  Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000027c0000042efc0200000002fb0000001400770072006900730074005f006c006500660074010000003f0000021f0000001700fffffffb0000001600730074006500720065006f005f006c0065006600740100000264000002090000001700ffffff0000031e0000042e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
-  Width: 1440
-  X: 0
-  Y: 0
-  stereo_left:
-    collapsed: false
-  wrist_left:
-    collapsed: false
