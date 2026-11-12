@@ -262,6 +262,7 @@ class GraspRobot:
         if self.stream is not None:
             self.stream.cancel()
             self.stream = None
+            time.sleep(0.4)    # the robot releases the stream's control a moment later: a command sent at once was rejected ("priority not higher") and cancelled
 
     def _stream_to(self, tip_xyz):
         """Replace the whole-body Cartesian target; the robot tracks it continuously (reached within 0.3 s, held for 1 s)."""
@@ -400,6 +401,11 @@ class GraspRobot:
         body = rby.BodyComponentBasedCommandBuilder()
         command = rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(np.asarray(q, float)))
         (body.set_right_arm_command if side == "right" else body.set_left_arm_command)(command)
+        other = "left" if side == "right" else "right"
+        if other in self.stash:       # the other arm holds a box: command it to stay (a command without it was cancelled by the robot)
+            pos = np.array(self.robot.get_state().position)
+            keep = rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(pos[15:22] if other == "left" else pos[8:15]))
+            (body.set_right_arm_command if other == "right" else body.set_left_arm_command)(keep)
         self._joint_move(body, name)
 
     def _activate(self, side, park_other=True):
@@ -472,6 +478,7 @@ class GraspRobot:
         comfortably (examples/gui/scene_config.py best_arm; `dest` = (x, y, height) where the box is going next, so that the arm can reach both).
         Starts from the current hand pose (the arm is made ready first if needed, the other arm parks)."""
         def body():
+            nonlocal arm
             if color in self.stash.values() or color == self.held:
                 raise TaskError(f"already holding the {color} box")
             if self.holding:        # one arm holds a box: the other takes a second one (the first stays in its hand)
@@ -606,6 +613,11 @@ class GraspRobot:
             if not self.meeting:
                 raise TaskError("the hands are not at the meeting pose")
             self.event("both hands back from the meeting pose")
+            apart = {}
+            for s_, sign in (("right", -1.0), ("left", 1.0)):         # first pull the hands apart along the part axis: turning them back with the parts
+                apart[s_] = self.ee_pose(s_).copy()                   # next to each other would swing the parts into each other
+                apart[s_][1, 3] += sign * 0.10
+            self._move_both(apart, 3.0)
             self._move_both(self.meeting, seconds)
             self.meeting = None
             pos = np.array(self.robot.get_state().position)           # the arms are not where the holds of the last task say
