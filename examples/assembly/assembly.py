@@ -6,7 +6,7 @@ direction for a male part, out of the opening for a female one), +x towards the 
 is seated in a female part {F} when their origins coincide and +z_M = -z_F, +x_M = +x_F: F_T_M = MATED. Approaching, F_T_M has t = (0, 0, gap).
 Poses are 4x4 homogeneous matrices; F_T_M = inv(C_T_F) @ C_T_M for the two parts seen by one camera (the camera-to-base transform cancels,
 which is why an unknown camera or joint-zero error does not matter for this measurement: slide 10).
-  /usr/bin/python3 assembly.py     prints the tolerance and the odds of fitting for a few clearances
+  /usr/bin/python3 assembly.py     prints the odds of a peg fitting for a few clearances and alignment accuracies
 """
 import itertools
 import math
@@ -131,20 +131,39 @@ def tolerance(clearance, engage, half_width, chamfer=0.0):
     """First-order limits for a straight insertion to start without jamming. `clearance` is the radial gap peg to hole [m], `engage` the length that
     must be in the hole before the peg is guided [m], `half_width` the peg's radius or half side [m], `chamfer` the lead-in at the hole mouth [m].
     A peg tilted by a needs a hole wider by about engage * a, so the tilt is at most 2 * clearance / engage; a roll b moves the peg's corners by
-    half_width * b, which must stay inside the clearance."""
+    half_width * b, which must stay inside the clearance. Each limit holds ALONE: lateral error and tilt add up (see fits(), which checks them jointly)."""
     return Tolerance(clearance + chamfer, 2 * clearance / engage, clearance / half_width)
+
+
+def axis_offsets(T_fm, depth):
+    """Where the male part's axis crosses the mouth plane of the hole (z_F = 0) and the plane `depth` inside it (z_F = -depth): lateral offsets (x, y) in the F
+    frame [m]. The peg tip direction is z_M, which is -z_F when seated."""
+    R, t = T_fm[:3, :3], T_fm[:3, 3]
+    axis = R[:, 2]
+    return [t[:2] + (zp - t[2]) / axis[2] * axis[:2] for zp in (0.0, -depth)]
+
+
+def fits(T_fm, clearance, depth, chamfer=0.0):
+    """Can a round peg with radial `clearance` slide into the hole to `depth` from this pose without touching the wall? Its axis must stay within the
+    clearance circle at the mouth (plus the `chamfer` lead-in) and at depth; in between it is a straight line, so that is enough. Lateral error and tilt
+    are NOT independent: a tilt moves the axis by depth * tilt at depth, on top of the lateral error (tolerance() gives each limit alone)."""
+    mouth, deep = axis_offsets(T_fm, depth)
+    return bool(np.linalg.norm(mouth) <= clearance + chamfer and np.linalg.norm(deep) <= clearance)
 
 
 def within(m, tol):
     return m.lateral <= tol.lateral and abs(m.tilt) <= tol.tilt and abs(m.roll) <= tol.roll
 
 
-# Landmark spheres (radius 12 mm) of a held part in its own frame: an ASSUMED layout for the interim cylinder-and-hole parts (body radius 22.5 mm, 70 mm
-# long behind the mating face, held by the fingers near the face), on the rear half so the fingers do not hide them. Found by a random search
-# for a layout whose every triangle of landmarks is scalene by at least 4.9 mm (two equal sides would let two assignments of the landmarks fit
-# equally well, and with a landmark hidden the pose would be ambiguous) with all distances >= 35 mm (the spheres, 24 mm across, stay separate blobs).
-# Replace it when the final CAD is known.
-HELD_MODEL = np.array([(0.0, 0.0, -0.083), (0.009, -0.0271, -0.0473), (-0.0018, 0.0284, -0.0614), (-0.0236, -0.0159, -0.054)])
+# Landmark spheres (radius LANDMARK_R) of a part in its own frame: an ASSUMED layout for the interim cylinder-and-hole parts (parts.py: body radius 22.5 mm,
+# 70 mm long behind the mating face). The parts stand upright on the table like the boxes and are picked from the side. Spheres are visual only (no collider,
+# as on the boxes), so what limits them is visibility: three sit on a ring of radius 32 mm around the lower rear of the body (the lowest clears the base, the
+# fingers hold the body above them) and one floats 40 mm out beside the mating face. Found by a random search maximising how badly any WRONG assignment of the
+# landmarks fits: >= 6.1 mm rms for every assignment of 3 or 4 of them (noise is ~0.5 mm). A flat ring alone was ambiguous (a 180 degree turn about an in-plane
+# axis fit it to ~1 mm); all distances >= 36 mm. At the 0.3 m the head rig sees the parts from, 12 mm spheres (35 px across) merged into one blob wherever two landmarks lined up along the
+# view, so the spheres are 6 mm in radius (18 px across). Replace it when the final CAD is known.
+LANDMARK_R = 0.006
+HELD_MODEL = np.array([(0.0401, 0.0005, -0.0021), (0.0306, 0.0094, -0.0507), (0.0001, 0.0320, -0.0573), (-0.0300, -0.0112, -0.0509)])
 
 
 # ---- pose of a held part from triangulated landmarks ---------------------------------------------------------------------------------------
@@ -173,13 +192,30 @@ def part_pose(points, model, max_rms=0.004, ambiguity=1.5):
 
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
-    print("clearance  engage  lateral  tilt   roll   | P(fits) with 1 mm / 1 deg / 1 deg (1 sigma) alignment error")
+    engage, half = 0.020, 0.0225
+    print("insertion odds with 1 mm lateral / 1 deg tilt / 1 deg roll (1 sigma, per axis) alignment error, 20 mm of the 30 mm peg to go in, 1 mm chamfer")
+    print("radial clearance | peg alone (circular) | with the roll limit (square, ...) | tilt limit 2c/L alone")
     for c in (0.0005, 0.001, 0.002, 0.003):
-        tol = tolerance(c, 0.020, 0.0225, chamfer=0.001)
-        n, ok = 4000, 0
+        n, ok_round, ok_square = 4000, 0, 0
         for _ in range(n):
-            lat = np.hypot(*rng.normal(0, 0.001, 2))
-            tilt = np.hypot(*rng.normal(0, math.radians(1), 2))
-            roll = rng.normal(0, math.radians(1))
-            ok += lat <= tol.lateral and tilt <= tol.tilt and abs(roll) <= tol.roll
-        print(f"{c * 1000:6.1f} mm {0.020 * 1000:4.0f} mm {tol.lateral * 1000:5.1f} mm {math.degrees(tol.tilt):4.1f} deg {math.degrees(tol.roll):4.1f} deg | {ok / n:5.1%}")
+            T = np.eye(4)
+            T[:3, :3] = rodrigues(np.r_[rng.normal(0, math.radians(1), 2), 0.0]) @ MATED
+            T[:3, 3] = np.r_[rng.normal(0, 0.001, 2), 0.030 - engage]
+            f = fits(T, c, engage, chamfer=0.001)
+            ok_round += f
+            ok_square += f and abs(rng.normal(0, math.radians(1))) <= tolerance(c, engage, half).roll
+        tol = tolerance(c, engage, half, chamfer=0.001)
+        print(f"{c * 1000:8.1f} mm      | {ok_round / n:6.1%}               | {ok_square / n:6.1%}                            | {math.degrees(tol.tilt):.1f} deg")
+    print("\nodds vs alignment accuracy (lateral mm, tilt deg: both 1 sigma per axis, tilt = lateral * 1 deg/mm), circular peg, 1 mm chamfer")
+    print("radial clearance |  0.25 mm |  0.5 mm |  1 mm  |  2 mm")
+    for c in (0.001, 0.002, 0.003):
+        row = []
+        for sl in (0.25, 0.5, 1.0, 2.0):
+            n, ok = 3000, 0
+            for _ in range(n):
+                T = np.eye(4)
+                T[:3, :3] = rodrigues(np.r_[rng.normal(0, math.radians(sl), 2), 0.0]) @ MATED
+                T[:3, 3] = np.r_[rng.normal(0, sl / 1000, 2), 0.030 - engage]
+                ok += fits(T, c, engage, chamfer=0.001)
+            row.append(f"{ok / n:6.1%}")
+        print(f"{c * 1000:8.1f} mm      | " + " | ".join(row))

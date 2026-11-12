@@ -6,8 +6,12 @@ import math
 
 import numpy as np
 
+import align_sim as S
 import assembly as A
 import head_camera as H
+import parts as P
+import part_perception as PP
+import vision as V
 
 
 def pose(R=np.eye(3), t=(0, 0, 0)):
@@ -68,6 +72,34 @@ def test_tolerance():
     print("ok  tolerance of a straight insertion")
 
 
+def test_parts():
+    walls = P.socket_walls()
+    seated = pose(A.MATED, (0, 0, P.PEG_L - 0.020))                     # peg 20 mm in
+    assert A.fits(seated, P.CLEARANCE, 0.020) and not P.collides(seated, walls)
+    # sideways by 0.9 clearance fits, by clearance + 0.5 mm does not (towards a wall face, where the polygon hole is tightest)
+    for k in range(P.N_WALLS):
+        a = 2 * math.pi * k / P.N_WALLS
+        d = lambda r: pose(A.MATED, (r * math.cos(a), r * math.sin(a), P.PEG_L - 0.020))
+        assert not P.collides(d(0.9 * P.CLEARANCE), walls) and A.fits(d(0.9 * P.CLEARANCE), P.CLEARANCE, 0.020)
+        assert P.collides(d(P.CLEARANCE + 0.0005), walls) and not A.fits(d(P.CLEARANCE + 0.0005), P.CLEARANCE, 0.020)
+    # the analytic condition and the ring of boxes agree on random poses (outside a 0.3 mm band around the boundary: the polygon hole is up to 0.19 mm wider)
+    rng = np.random.default_rng(11)
+    checked = 0
+    for _ in range(600):
+        T = pose(A.rodrigues(np.r_[rng.normal(0, math.radians(1.5), 2), 0.0]) @ A.MATED, np.r_[rng.normal(0, 0.0015, 2), P.PEG_L - 0.020])
+        mouth, deep = A.axis_offsets(T, 0.020)
+        if abs(P.CLEARANCE - max(np.linalg.norm(mouth), np.linalg.norm(deep))) < 0.0003:
+            continue
+        assert A.fits(T, P.CLEARANCE, 0.020) == (not P.collides(T, walls))
+        checked += 1
+    assert checked > 300
+    # tilt alone: the peg turned about the mouth by more than clearance / depth does not go in, a little less does
+    tilt = lambda deg: pose(rot((1, 0, 0), deg) @ A.MATED, (0, 0, 0.0))
+    limit = math.degrees(P.CLEARANCE / 0.020)
+    assert A.fits(tilt(0.8 * limit), P.CLEARANCE, 0.020) and not A.fits(tilt(1.3 * limit), P.CLEARANCE, 0.020)
+    print(f"ok  parts: hole as {P.N_WALLS} boxes agrees with the fit condition on {checked} random poses")
+
+
 def test_part_pose():
     rng = np.random.default_rng(5)
     et, er = [], []
@@ -91,18 +123,8 @@ def test_part_pose():
     print("ok  pose of a held part from landmarks (any orientation, 3 or 4 landmarks, ambiguity refused)")
 
 
-def meeting(gap=0.02, centre=(0.40, 0.0, 1.05)):
-    """F (socket, left hand) and M (peg, right hand), insertion axis along base y, F's opening towards -y, key up: T_base_F, T_base_M."""
-    c = np.asarray(centre, float)
-    RF = np.column_stack([(0, 0, 1), (-1, 0, 0), (0, -1, 0)]).astype(float)
-    RM = np.column_stack([(0, 0, 1), (1, 0, 0), (0, 1, 0)]).astype(float)
-    TF = pose(RF, c + (0, 0.0, 0))
-    TM = pose(RM, c + RF[:, 2] * gap)
-    return TF, TM
-
-
 def test_head_stereo():
-    TF, TM = meeting()
+    TF, TM = S.meeting(0.02)
     assert np.allclose(A.relative_pose(TF, TM), pose(A.MATED, (0, 0, 0.02)), atol=1e-12)
     lm = {name: (T[:3, :3] @ A.HELD_MODEL.T).T + T[:3, 3] for name, T in (("F", TF), ("M", TM))}
     q = dict(H.SEED_TORSO) | {"head_1": 0.5}
@@ -132,13 +154,56 @@ def test_head_stereo():
     a1, t1, r1 = measure(qb)
     assert a1 > 3 * a0 and a1 > 0.008, f"1 degree of joint zero error should move the absolute pose by a centimetre or so, got {a1 * 1000:.1f} mm"
     assert t1 < 0.006 and r1 < 3.0, "the relative pose must stay as good (slide 10: camera-to-base cancels)"
-    print(f"ok  head stereo, two held parts at 0.4 m: exact joints: absolute {a0 * 1000:.1f} mm, relative {t0 * 1000:.1f} mm / {r0:.1f} deg; "
+    print(f"ok  head stereo, two held parts 0.4 m ahead: exact joints: absolute {a0 * 1000:.1f} mm, relative {t0 * 1000:.1f} mm / {r0:.1f} deg; "
           f"joints 1 deg off: absolute {a1 * 1000:.1f} mm, relative {t1 * 1000:.1f} mm / {r1:.1f} deg")
+
+
+RGB = {"blue": (0, 0, 255), "yellow": (255, 255, 0), "red": (255, 0, 0)}
+
+
+def render(T, spheres, rng, hidden=()):
+    """Image of coloured spheres (radius A.LANDMARK_R) seen from T_base_camera: [(point, colour)]; `hidden` indices are left out."""
+    img = np.zeros((V.H, V.W, 3), np.uint8)
+    vv, uu = np.mgrid[0:V.H, 0:V.W]
+    for i, (p, color) in enumerate(spheres):
+        if i in hidden:
+            continue
+        (u, v), z = (a[0] for a in V.project(T, np.array([p])))
+        img[np.hypot(uu - u - rng.normal(0, 0.15), vv - v - rng.normal(0, 0.15)) < V.FX * A.LANDMARK_R / z] = RGB[color]
+    return img
+
+
+def test_part_perception():
+    rng = np.random.default_rng(2)
+    TF, TM = S.meeting(0.02)
+    q = dict(H.SEED_TORSO) | {"head_1": 0.5}
+    TL, TR = H.stereo_poses(q)
+    spheres = [(p, "blue") for p in S.landmarks_base(TF)] + [(p, "yellow") for p in S.landmarks_base(TM)] + [(np.array([0.30, -0.05, 0.95]), "red")]
+    for label, hidden_l, hidden_r in (("all landmarks seen", (), ()), ("one landmark of the female hidden in the left image", (1,), ()),
+                                      ("one of each part hidden in different images", (2,), (7,))):
+        got = PP.part_poses(render(TL, spheres, rng, hidden_l), render(TR, spheres, rng, hidden_r), TL, TR)
+        assert set(got) == {"blue", "yellow"}, f"{label}: found {sorted(got)}"
+        for color, T in (("blue", TF), ("yellow", TM)):
+            R, t, rms, k = got[color]
+            assert np.linalg.norm(t - T[:3, 3]) < 0.003 and np.degrees(np.arccos(np.clip((np.trace(R.T @ T[:3, :3]) - 1) / 2, -1, 1))) < 3.0, f"{label}: {color}"
+        rel = A.mating_error(A.relative_pose(*(np.block([[got[c][0], got[c][1][:, None]], [np.zeros((1, 3)), np.ones((1, 1))]]) for c in ("blue", "yellow"))), "A", gap=0.02)
+        print(f"ok  part perception from images, {label}: relative pose {math.hypot(rel.lateral, rel.axial) * 1000:.1f} mm, {math.degrees(rel.tilt):.1f} deg off the truth")
+
+
+def test_align_loop():
+    easy, _, why = S.rate(n=20, seed=1, clearance=0.003, noise_px=0.2, frames=5)
+    hard, _, _ = S.rate(n=20, seed=1, clearance=0.0003, noise_px=0.2, frames=5)
+    assert easy >= 0.9, f"observe-move-reobserve with 3 mm clearance: {easy:.0%} seated"
+    assert hard <= 0.5, f"a 0.3 mm clearance must fail often with this alignment accuracy, got {hard:.0%}"
+    print(f"ok  alignment loop: {easy:.0%} seated with 3 mm clearance, {hard:.0%} with 0.3 mm (head stereo noise 0.2 px, 5 frames per look)")
 
 
 if __name__ == "__main__":
     test_mating()
     test_tolerance()
+    test_parts()
     test_part_pose()
     test_head_stereo()
-    print("4 assembly checks passed")
+    test_part_perception()
+    test_align_loop()
+    print("7 assembly checks passed")
