@@ -48,7 +48,6 @@ R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # 
 TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
 READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])      # the left arm takes the same values (checked with forward kinematics: same hand orientation,
 PARK = np.zeros(7)                                                # camera on the back of the hand); the arm that is not working hangs at its side
-GRIP_TORQUE = 20.0   # gripper current limit in the current-based position mode (the library's loop uses 5)
 HOLDING_CLOSENESS = (0.2, 0.85)  # gripper closeness range of a closed hand with the 5 cm box between the fingers (about 0.5)
 
 
@@ -157,8 +156,6 @@ class GraspRobot:
         assert self.gripper.initialize()
         self.gripper.homing()
         self.gripper.start()
-        time.sleep(0.5)       # the library's loop writes its own torque limit (5) once at its start; a box with the hand turned pushed a finger open at that limit
-        self.gripper.bus.group_sync_write_send_torque([(i, GRIP_TORQUE) for i in self.gripper.GRIPPER_IDS])
         self.gripper.set_open()
         self.dyn = self.robot.get_dynamics()
         self.fks = {s: self.dyn.make_state(["base", f"ee_{s}"], rby.Model_A().robot_joint_names) for s in C.ARMS}

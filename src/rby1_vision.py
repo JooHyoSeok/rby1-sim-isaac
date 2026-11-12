@@ -58,6 +58,7 @@ TABLE_TOP = 0.72
 # A thin top without legs: a solid box down to the floor gets hit by the hand when it swings up from the hanging pose.
 TABLE_CENTER, TABLE_SIZE = (0.88, 0.0, TABLE_TOP - 0.02), (0.6, 0.8, 0.04)  # front edge x=0.58
 OBJECT_SIZE = (0.05, 0.05, 0.08)  # tall enough to be grasped above the table surface
+FINGER_STIFFNESS = float(os.environ.get("RBY1_FINGER_STIFFNESS", "1000"))  # N/m of the driven finger (the asset has 100: a box held with the hand turned slid out of it); 0 = the asset's own
 OBJECT_MASS, OBJECT_FRICTION = 0.1, float(os.environ.get("RBY1_OBJECT_FRICTION", "1.5"))  # a dynamic rigid body the gripper can lift (friction: object and fingers)
 # The side landmarks sit 2.5 cm off the faces (1.3 cm clear of them): at 3.7 cm the stereo camera on the far side saw them half hidden
 # behind the box edge, which biased their centroids (found in a stack of three).
@@ -174,6 +175,14 @@ def add_gripper_colliders(stage) -> None:
         print(f"[Vision] {body.GetPath()} mass authored={mass.HasAuthoredValue()} value={mass.Get()}")
         if not mass.HasAuthoredValue() or not mass.Get():
             mass.Set(FINGER_MASS)
+    for side in ("left", "right"):        # the finger force limit lives in the USD drives (the simulated bus only echoes its torque goal)
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(f"{ROBOT_ROOT}/{side}_gripper")):
+            attrs = {a.GetName(): a.Get() for a in prim.GetAttributes() if a.GetName().startswith("drive:") and any(k in a.GetName() for k in ("maxForce", "stiffness", "damping"))}
+            if attrs:
+                print(f"[Vision] {side} gripper drive {prim.GetPath().name}: {attrs}")
+                if FINGER_STIFFNESS and prim.GetPath().name.endswith("1"):      # the driven finger: its stiffness times the closing error is the grip force
+                    prim.GetAttribute("drive:linear:physics:stiffness").Set(FINGER_STIFFNESS)
+                    print(f"[Vision] {side} gripper {prim.GetPath().name}: stiffness set to {FINGER_STIFFNESS}")
     print(f"[Vision] {count} finger meshes got convex-hull colliders, {len(finger_bodies)} finger bodies filtered "
           f"against {len(robot_bodies)} robot bodies")
 
