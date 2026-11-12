@@ -278,3 +278,35 @@ def table_spot(name, boxes, top=TABLE_TOP, table_center=TABLE_CENTER, table_size
         if spot is not None:
             return spot
     return None
+
+
+# ---- two hands at the mating plane (examples/assembly/meet_study.py: reachable at x 0.42..0.48, z 0.9..1.1 with the torso squatted) --------------------
+# The insertion axis is the base y axis, the mating plane is y = 0. The left hand holds the female part (it extends to +y), the right hand the male part
+# (to -y); each grasp point is MEET_GRASP_BACK behind its part's mating face, so the grasp points are 2 * MEET_GRASP_BACK + gap apart. The fingers close
+# across the part (vertical closing axis), the tool axis points forward ("forward") or 30 degrees inward ("inward": the elbows spread, 33 cm apart
+# instead of 9 cm in the study). The wrist link frame: x = the closing axis, z = against the tool axis; the ee frame has the same orientation, its origin
+# EE_BEHIND_GRASP behind the grasp point along the tool axis (fingertips 5 mm past the grasp point, ee 0.12 behind the fingertips).
+MEET_GRASP_BACK = 0.03
+EE_BEHIND_GRASP = 0.115
+MEET_VARIANTS = {"forward": ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0)),
+                 "inward": ((math.cos(math.radians(30)), math.sin(math.radians(30)), 0.0), (0.0, 0.0, 1.0))}    # tool axis and closing axis of the RIGHT hand
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def meet_targets(x, z, gap=MEET_GRASP_BACK, variant="forward"):
+    """{"right"/"left": {"R": 3x3 rows (the ee orientation), "ee": [x, y, z] (the ee origin), "grasp": [x, y, z]}} for the two hands holding their parts at
+    (x, 0, z) in the base frame, the parts `gap` apart (0 = seated)."""
+    tool, closing = MEET_VARIANTS[variant]
+    out = {}
+    for side, sign in (("right", 1.0), ("left", -1.0)):
+        t, c = (tool[0], sign * tool[1], tool[2]), (closing[0], sign * closing[1], closing[2])
+        zc = (-t[0], -t[1], -t[2])
+        yc = _cross(zc, c)
+        R = [[c[i], yc[i], zc[i]] for i in range(3)]             # columns x, y, z
+        y = -(gap + MEET_GRASP_BACK) if side == "right" else MEET_GRASP_BACK
+        g = (x, y, z)
+        out[side] = {"R": R, "grasp": list(g), "ee": [g[i] + EE_BEHIND_GRASP * zc[i] for i in range(3)]}
+    return out

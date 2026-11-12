@@ -5,6 +5,7 @@ Covers: scene_config reachability and the multi-box helpers, the pure grasp_core
 camera views), servo_server's command handling with a fake robot (queueing, errors, abort, reply port) and rbyctl against it.
 Not covered: anything that talks to the simulator or the robot (the rest of grasp_core.GraspRobot, rby1_vision.poll_commands).
 """
+import contextlib
 import json
 import os
 import socket
@@ -426,6 +427,12 @@ class FakeRobot:
         if traj.get("unit") == "bad":
             raise grasp_core.TaskError("the trajectory is not safe: test")
 
+    def meet(self, x=0.48, z=1.0, gap=0.03, variant="forward", seconds=8.0):
+        self.calls.append(("meet", x, z, gap, variant))
+
+    def unmeet(self):
+        self.calls.append(("unmeet",))
+
     def stack(self, order):
         self.calls.append(("stack", tuple(order)))
         if "yellow" not in order:
@@ -482,6 +489,10 @@ def test_server():
         srv.handle({"cmd": "gripper", "closeness": 1.0})
         time.sleep(0.2)
         assert ("gripper", 1.0) in robot.calls
+        srv.handle({"cmd": "meet", "x": 0.45, "z": 1.0, "variant": "inward"})
+        srv.handle({"cmd": "unmeet"})
+        time.sleep(0.4)
+        assert ("meet", 0.45, 1.0, 0.03, "inward") in robot.calls and ("unmeet",) in robot.calls, robot.calls
         beats = [m for m in recv_all(status_rx, 1.2) if m["type"] == "status"]
         assert beats and beats[-1]["state"] == "idle" and beats[-1]["seeded"] is True
     finally:
@@ -856,6 +867,60 @@ def test_arms():
         assert "none reaches both" in str(exc) or "neither arm" in str(exc), str(exc)
 
 
+def test_meet():
+    """Two hands at the mating plane: the target poses, the pose ramp, the arms that stay as they are, and what is refused while the hands meet."""
+    for variant in C.MEET_VARIANTS:
+        t = C.meet_targets(0.48, 1.0, 0.03, variant)
+        for side in C.ARMS:
+            R = np.array(t[side]["R"])
+            assert np.allclose(R @ R.T, np.eye(3), atol=1e-9) and np.isclose(np.linalg.det(R), 1.0), (variant, side)
+            assert abs(R[1, 0]) < 1e-9, "the fingers close across the part: the closing axis (x of the ee) is perpendicular to the part axis (base y)"
+            assert np.allclose(np.array(t[side]["ee"]), np.array(t[side]["grasp"]) + C.EE_BEHIND_GRASP * R[:, 2])
+        assert np.isclose(t["right"]["grasp"][1], -0.06) and np.isclose(t["left"]["grasp"][1], 0.03)           # male on the right, female on the left
+    fwd = C.meet_targets(0.48, 1.0, 0.03, "forward")
+    assert np.allclose(-np.array(fwd["right"]["R"])[:, 2], [1, 0, 0])                                          # the fingertips point forward
+    inw = C.meet_targets(0.48, 1.0, 0.03, "inward")
+    assert -np.array(inw["right"]["R"])[1, 2] > 0.4 and -np.array(inw["left"]["R"])[1, 2] < -0.4               # turned towards each other
+    assert np.isclose(C.meet_targets(0.48, 1.0, 0.0, "forward")["right"]["grasp"][1], -0.03)                   # seated: 6 cm between the grasp points
+    # the ramp between two ee poses: the ends, and half way is half the rotation
+    r = object.__new__(grasp_core.GraspRobot)
+    T0, T1 = np.eye(4), np.eye(4)
+    T1[:3, :3], T1[:3, 3] = r._rodrigues(np.array([0.0, 0.0, 1.2])), [0.2, 0.0, 0.1]
+    assert np.allclose(r._interp(T0, T1, 0.0), T0) and np.allclose(r._interp(T0, T1, 1.0), T1)
+    mid = r._interp(T0, T1, 0.5)
+    assert np.allclose(r._rotvec(mid[:3, :3]), [0.0, 0.0, 0.6]) and np.allclose(mid[:3, 3], [0.1, 0.0, 0.05])
+    # an arm that holds a box is not parked when the other one gets ready; a free one is
+    r.events, r.side, r.squatted, r.ready, r.seeded, r.stash, r.meeting = [], "right", True, {"right": True, "left": True}, True, {"left": "yellow"}, None
+    r.event = r.events.append
+    calls = []
+    r._joint_arm = lambda side, q, seconds, name: calls.append((name, side))
+    r.cmd_tip, r.tip, r.hold = None, (lambda side=None: np.zeros(3)), {"right": {}, "left": {}}
+    r.robot = type("Robot", (), {"get_state": lambda s: type("S", (), {"position": np.zeros(24)})()})()
+    r._activate("right")
+    assert calls == [], "the left arm holds the yellow box: it stays"
+    r.stash = {}
+    r._activate("right")
+    assert calls == [("park", "left")], calls
+    r._activate("left", park_other=False)
+    assert calls == [("park", "left"), ("arm", "left")] and r.ready == {"right": True, "left": True}, calls      # both ready at once, nothing parked
+    # while the hands meet only meet, unmeet and joint moves run; home needs the boxes put down
+    r.meeting, r.phase, r._depth = {"right": np.eye(4), "left": np.eye(4)}, "idle", 0
+    r.job = contextlib.nullcontext
+    for name in ("pick", "place", "seed", "stack"):
+        try:
+            r._run(name, lambda: None)
+            raise AssertionError(name)
+        except grasp_core.TaskError as exc:
+            assert "unmeet" in str(exc), str(exc)
+    r._run("joints", lambda: None)
+    r.meeting, r.holding, r.stash = None, False, {"left": "yellow"}
+    try:
+        r.home()
+        raise AssertionError("home with a box in a hand")
+    except grasp_core.TaskError as exc:
+        assert "holds a box" in str(exc), str(exc)
+
+
 def test_unstack():
     """GraspRobot.unstack with a fake scene: top box first, onto its own start spot, bottom box stays; a clear table is refused."""
     r = object.__new__(grasp_core.GraspRobot)
@@ -954,7 +1019,7 @@ def test_rbyctl():
 
 
 if __name__ == "__main__":
-    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_base_frame, test_arms, test_unstack, test_server, test_rbyctl]
+    tests = [test_config, test_boxes, test_helpers, test_align, test_verify_and_stack, test_map, test_window, test_say, test_base_motion, test_drive, test_base_frame, test_arms, test_meet, test_unstack, test_server, test_rbyctl]
     for t in tests:
         t()
         print(f"ok  {t.__name__}")

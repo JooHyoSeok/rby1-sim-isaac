@@ -15,6 +15,7 @@ import socket
 import sys
 import threading
 import time
+import types
 
 import numpy as np
 
@@ -129,6 +130,7 @@ class Perception:
 
 class GraspRobot:
     _driving, _latched = False, None     # (class defaults: the offline tests build the object without __init__)
+    meeting, stash = None, types.MappingProxyType({})     # (class defaults too; __init__ gives each robot its own dict for the stash)
 
     def __init__(self, perception: Perception, event=lambda text: print(text, flush=True)):
         import rby1_sdk as rby
@@ -141,6 +143,8 @@ class GraspRobot:
         self.phase, self.holding, self.seeded = "idle", False, False
         self.held = None      # colour of the box in the hand
         self.side, self.held_side = "right", None     # the arm a task works with / the arm that holds the box
+        self.stash = {}       # {arm: colour}: the box the OTHER arm holds while this one takes a second box (two-handed tasks)
+        self.meeting = None   # {arm: ee pose before the meeting pose}: both hands are at the meeting pose (meet), come back with unmeet
         self.squatted, self.ready = False, {"right": False, "left": False}     # torso squat done / which arm stands in the READY pose
         self._depth = 0       # nesting of _run / job: only the outermost one clears the abort flag
         self.robot = rby.create_robot_a("127.0.0.1:50051")
@@ -210,7 +214,7 @@ class GraspRobot:
         return {"phase": self.phase, "holding": self.holding, "held": self.held, "seeded": self.seeded,
                 "tip": self.tip("right").round(4).tolist(), "closeness": round(self.closeness("right"), 2), "base": [round(x, 3), round(y, 3), round(float(np.degrees(yaw)), 1)],
                 "arm": self.held_side or self.side, "ready": [s for s in C.ARMS if self.ready[s]], "tip_left": self.tip("left").round(4).tolist(),
-                "closeness_left": round(self.closeness("left"), 2)}
+                "closeness_left": round(self.closeness("left"), 2), "stash": dict(self.stash), "meeting": bool(self.meeting)}
 
     def state(self):
         """Joint positions by name [rad] and the right hand's pose, for the agent tools (examples/agent/robot_tools.py)."""
@@ -269,8 +273,10 @@ class GraspRobot:
                 .set_minimum_time(0.3).add_target("base", f"ee_{self.side}", T, 0.3, 1.0, 1.0))
         for joint, q in self.hold["left" if self.side == "right" else "right"].items():      # the other arm stays where it is
             cart.add_joint_position_target(joint, float(q))
-        rc = rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
-            rby.BodyCommandBuilder().set_command(cart)).set_mobility_command(self._mobility_hold()))
+        self._send_stream(rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
+            rby.BodyCommandBuilder().set_command(cart)).set_mobility_command(self._mobility_hold())))
+
+    def _send_stream(self, rc):
         for attempt in (0, 1):
             if self.stream is None:
                 self.stream = self.robot.create_command_stream(10)
@@ -281,6 +287,15 @@ class GraspRobot:
                 if "expired" not in str(exc) or attempt:
                     raise
                 self.stream = None   # a stream that sat idle (between two tasks) expires: open a new one and send again
+
+    def _stream_both(self, poses):
+        """Whole-body Cartesian targets for both ee frames at once: poses = {"right": 4x4, "left": 4x4} in the base frame."""
+        rby = self.rby
+        cart = (rby.CartesianCommandBuilder().set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1.0)).set_minimum_time(0.3))
+        for side, T in poses.items():
+            cart.add_target("base", f"ee_{side}", T, 0.3, 1.0, 1.0)
+        self._send_stream(rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
+            rby.BodyCommandBuilder().set_command(cart)).set_mobility_command(self._mobility_hold())))
 
     def _mobility_hold(self):
         """Zero planar velocity for the wheels, sent along with every arm and torso command: the unbraked base rolls away otherwise (it drifted 17 cm and 6
@@ -362,6 +377,8 @@ class GraspRobot:
     def _run(self, name, fn, *args, **kw):
         """Run a task body: clears the abort flag (outermost call only), recovers after a fault or an abort, leaves the robot ready for
         the next task. Tasks nest (stack = pick + place_on, pick = seed first)."""
+        if self.meeting and name not in ("meet", "unmeet", "joints"):
+            raise TaskError("the hands are at the meeting pose: unmeet first")
         with self.job():
             outer, self.phase = self.phase, name
             try:
@@ -385,11 +402,11 @@ class GraspRobot:
         (body.set_right_arm_command if side == "right" else body.set_left_arm_command)(command)
         self._joint_move(body, name)
 
-    def _activate(self, side):
+    def _activate(self, side, park_other=True):
         """Make `side` the arm at work: the other arm hangs at its side (it would be in the way near the middle), the torso is squatted (the straight
         arm is a Cartesian singularity), this arm stands in the READY pose. Does only what is not already so."""
         other = "left" if side == "right" else "right"
-        if self.ready[other]:
+        if park_other and self.ready[other] and other not in self.stash:     # an arm that holds a box stays where it is
             self.event(f"park the {other} arm")
             self._joint_arm(other, PARK, 6.0, "park")
             self.ready[other] = False
@@ -415,8 +432,8 @@ class GraspRobot:
 
     def home(self):
         def body():
-            if self.holding:
-                raise TaskError("the hand holds the box: place it first")
+            if self.holding or self.stash:
+                raise TaskError("a hand holds a box: place it first")
             for s in C.ARMS:
                 self._grip(0.0, s)
             self.ready["right"] = False          # stand the right arm in the READY pose again, whatever happened to it
@@ -425,6 +442,8 @@ class GraspRobot:
 
     def set_gripper(self, closeness, arm="right"):
         self._grip(float(closeness), arm)
+        if closeness < 0.5 and arm in self.stash:
+            self.stash.pop(arm)
         if closeness < 0.5 and arm == self.held_side:
             self.holding, self.held, self.held_side = False, None, None
 
@@ -453,8 +472,15 @@ class GraspRobot:
         comfortably (examples/gui/scene_config.py best_arm; `dest` = (x, y, height) where the box is going next, so that the arm can reach both).
         Starts from the current hand pose (the arm is made ready first if needed, the other arm parks)."""
         def body():
-            if self.holding:
-                raise TaskError(f"already holding the {self.held} box")
+            if color in self.stash.values() or color == self.held:
+                raise TaskError(f"already holding the {color} box")
+            if self.holding:        # one arm holds a box: the other takes a second one (the first stays in its hand)
+                other = "left" if self.held_side == "right" else "right"
+                if arm not in ("auto", other):
+                    raise TaskError(f"the {self.held_side} arm holds the {self.held} box: only the {other} arm can take another")
+                arm = other
+                self.stash[self.held_side] = self.held
+                self.holding, self.held, self.held_side = False, None, None
             if color not in C.BOX_NAMES:
                 raise TaskError(f"unknown box '{color}' (boxes: {', '.join(C.BOX_NAMES)})")
             if not self.perception.wait_box(color, 3, abort=self.abort_flag):
@@ -498,6 +524,94 @@ class GraspRobot:
             self._hold(0.3)
             self.debug(stage="done", text=["done"])
         self._run("pick", body)
+
+    # ---- two hands -----------------------------------------------------------------------------------------------------
+    MIN_ARM_GAP = 0.04      # [m] elbows and forearms closer than this stop a two-handed move (examples/assembly/meet_study.py: 9 cm "forward", 33 cm "inward")
+
+    def _arm_gap(self):
+        """Smallest distance between the elbows / forearms of the two arms from the joint state [m]."""
+        import kinematics as K
+        q = dict(zip(self.rby.Model_A().robot_joint_names, np.array(self.robot.get_state().position)))
+        P = K.all_points(q)
+        return min(float(np.linalg.norm(P[f"right_{a}"] - P[f"left_{b}"])) for a in ("elbow", "forearm") for b in ("elbow", "forearm"))
+
+    @staticmethod
+    def _rotvec(R):
+        c = float(np.clip((np.trace(R) - 1) / 2, -1.0, 1.0))
+        a = np.arccos(c)
+        if a < 1e-9:
+            return np.zeros(3)
+        v = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+        return v / np.linalg.norm(v) * a if a > np.pi - 1e-3 else v / (2 * np.sin(a)) * a
+
+    @staticmethod
+    def _rodrigues(r):
+        a = np.linalg.norm(r)
+        if a < 1e-12:
+            return np.eye(3)
+        k = r / a
+        K_ = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        return np.eye(3) + np.sin(a) * K_ + (1 - np.cos(a)) * K_ @ K_
+
+    def _interp(self, T0, T1, a):
+        T = np.eye(4)
+        T[:3, :3] = self._rodrigues(a * self._rotvec(T1[:3, :3] @ T0[:3, :3].T)) @ T0[:3, :3]
+        T[:3, 3] = T0[:3, 3] + a * (T1[:3, 3] - T0[:3, 3])
+        return T
+
+    def _move_both(self, T1, seconds):
+        """Both ee frames to the poses T1 ({arm: 4x4}) on one smooth ramp, streamed; stops when the arms come closer than MIN_ARM_GAP."""
+        T0 = {s: self.ee_pose(s) for s in T1}
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            t_loop = time.time()
+            self._check()
+            self._stream_both({s: self._interp(T0[s], T1[s], smoothstep((t_loop - t0) / seconds)) for s in T1})
+            gap = self._arm_gap()
+            if gap < self.MIN_ARM_GAP:
+                raise TaskError(f"the arms come {gap * 100:.1f} cm apart (limit {self.MIN_ARM_GAP * 100:.0f} cm): stopped")
+            self._tick(t_loop)
+        for _ in range(int(1.5 * RATE)):                            # hold the end pose until it is reached
+            t_loop = time.time()
+            self._check()
+            self._stream_both(T1)
+            self._tick(t_loop)
+
+    def meet(self, x=0.48, z=1.0, gap=C.MEET_GRASP_BACK, variant="forward", seconds=8.0):
+        """Both hands to the mating plane in front of the chest (scene_config.meet_targets), whatever they hold. Both arms are made ready first (an arm
+        that holds a box stays as it is, so pick the two parts first). Come back with unmeet."""
+        def body():
+            if variant not in C.MEET_VARIANTS:
+                raise TaskError(f"unknown hand orientation '{variant}' ({', '.join(C.MEET_VARIANTS)})")
+            self._activate("right", park_other=False)
+            self._activate("left", park_other=False)
+            tg = C.meet_targets(x, z, gap, variant)
+            T1 = {}
+            for s in C.ARMS:
+                T1[s] = np.eye(4)
+                T1[s][:3, :3], T1[s][:3, 3] = np.array(tg[s]["R"]), tg[s]["ee"]
+            if self.meeting is None:
+                self.meeting = {s: self.ee_pose(s) for s in C.ARMS}
+            self.event(f"both hands to the meeting pose x {x:.2f}, z {z:.2f} ({variant}, grasp points {(2 * C.MEET_GRASP_BACK + gap) * 100:.0f} cm apart)")
+            self._move_both(T1, seconds)
+            err = {s: (float(np.linalg.norm(self.ee_pose(s)[:3, 3] - T1[s][:3, 3])) * 1000,
+                       float(np.degrees(np.linalg.norm(self._rotvec(T1[s][:3, :3] @ self.ee_pose(s)[:3, :3].T))))) for s in C.ARMS}
+            self.event("meeting pose reached: " + ", ".join(f"{s} {e[0]:.1f} mm / {e[1]:.1f} deg" for s, e in err.items()) + f"; arms {self._arm_gap() * 100:.0f} cm apart")
+            self.cmd_tip = self.tip()
+        self._run("meet", body)
+
+    def unmeet(self, seconds=8.0):
+        """Both hands back to where they were before the first meet."""
+        def body():
+            if not self.meeting:
+                raise TaskError("the hands are not at the meeting pose")
+            self.event("both hands back from the meeting pose")
+            self._move_both(self.meeting, seconds)
+            self.meeting = None
+            pos = np.array(self.robot.get_state().position)           # the arms are not where the holds of the last task say
+            self.hold = {s: dict(zip([f"{s}_arm_{i}" for i in range(7)], pos[8:15] if s == "right" else pos[15:22])) for s in C.ARMS}
+            self.cmd_tip = self.tip()
+        self._run("unmeet", body)
 
     def _place_at(self, x, y, top, base=None):
         """Carry the held box over (x, y) (rise first, so it clears boxes on the way), lower it onto a surface of height `top`, let go,

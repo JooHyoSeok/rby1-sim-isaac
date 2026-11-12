@@ -8,6 +8,7 @@
   rbyctl.py move blue right [--arm ..]     pick the blue box and put it on the free spot furthest right (left | near | far | center), or at x y;
                                            the spot must be reachable by the arm that picks
   rbyctl.py stack green blue yellow        bottom first; the first box stays where it is
+  rbyctl.py meet [--x 0.48 --z 1.0 --gap 0.03 --variant forward|inward]   both hands to the mating plane (pick two boxes first: one per arm), unmeet back
   rbyctl.py unstack                        take a stack apart: top box first onto free table spots (its own start spot when free)
   rbyctl.py drive [--forward M] [--turn DEG] [--home]   roll the base (turn first, positive = left; at most 30 cm / 90 deg per command), or back to the start
   rbyctl.py home | seed | abort | gripper 0.0..1.0
@@ -164,7 +165,13 @@ def main(argv=None):
     p = sub.add_parser("stack")
     p.add_argument("order", nargs="+", choices=C.BOX_NAMES, help="bottom first")
     p.set_defaults(fn=lambda a: run_task({"cmd": "stack", "order": a.order}))
-    for verb in ("home", "seed", "unstack"):
+    p = sub.add_parser("meet")
+    p.add_argument("--x", type=float, default=0.48)
+    p.add_argument("--z", type=float, default=1.0)
+    p.add_argument("--gap", type=float, default=C.MEET_GRASP_BACK, help="distance between the two parts [m], 0 = seated")
+    p.add_argument("--variant", choices=sorted(C.MEET_VARIANTS), default="forward")
+    p.set_defaults(fn=lambda a: run_task({"cmd": "meet", "x": a.x, "z": a.z, "gap": a.gap, "variant": a.variant}))
+    for verb in ("home", "seed", "unstack", "unmeet"):
         sub.add_parser(verb).set_defaults(fn=lambda a, v=verb: run_task({"cmd": v}))
     p = sub.add_parser("drive")
     p.add_argument("--forward", type=float, default=0.0, help="metres, negative = back")
