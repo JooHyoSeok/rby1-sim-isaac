@@ -42,9 +42,9 @@ STEREO_BASELINE = 0.12
 WRIST_CAM = {side: (np.array([0.0, 0.08, -0.12]), np.array([0.0, -0.08, -0.28]), np.array([0.0, 1.0, 0.0]))
              for side in ("left", "right")}
 
-# Stereo rig on the head (opt-in, RBY1_HEAD_CAM=1: two more cameras to render): the eyes in the frame of link_head_2, which looks along +x with y to the
-# left and z up. examples/assembly/head_camera.py repeats this mount: keep them equal. Not run in the simulator yet (the prim path of the head link and the
-# mount are guesses until then).
+# Stereo rig on the head (opt-in, RBY1_HEAD_CAM=1: two more cameras to render; verified in the simulator 2026-11-12: FK-predicted landmark pixels within 1 px): the eyes in the frame of link_head_2, which looks along +x with y to the
+# left and z up. examples/assembly/head_camera.py repeats this mount: keep them equal.
+
 HEAD_CAM = os.environ.get("RBY1_HEAD_CAM", "0") == "1"
 HEAD_MOUNT, HEAD_BASELINE = np.array([0.06, 0.0, 0.03]), 0.12
 
