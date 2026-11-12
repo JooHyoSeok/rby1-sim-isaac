@@ -42,6 +42,12 @@ STEREO_BASELINE = 0.12
 WRIST_CAM = {side: (np.array([0.0, 0.08, -0.12]), np.array([0.0, -0.08, -0.28]), np.array([0.0, 1.0, 0.0]))
              for side in ("left", "right")}
 
+# Stereo rig on the head (opt-in, RBY1_HEAD_CAM=1: two more cameras to render): the eyes in the frame of link_head_2, which looks along +x with y to the
+# left and z up. examples/assembly/head_camera.py repeats this mount: keep them equal. Not run in the simulator yet (the prim path of the head link and the
+# mount are guesses until then).
+HEAD_CAM = os.environ.get("RBY1_HEAD_CAM", "0") == "1"
+HEAD_MOUNT, HEAD_BASELINE = np.array([0.06, 0.0, 0.03]), 0.12
+
 FINGER_MASS = 0.02  # kg, for finger bodies whose USD sets no mass
 SPHERE_R = 0.012
 # Asymmetric red landmarks P1..P4 in the wrist link frame (P1 is the single sphere for eye-to-hand calibration).
@@ -195,6 +201,12 @@ def build_scene(stage) -> dict[str, str]:
         cams[f"wrist_{side}"] = path
         for i, p in enumerate(EE_LANDMARKS, 1):
             _sphere(stage, f"{ROBOT_ROOT}/{link}/P{i}", p, (1, 0, 0), red)
+
+    if HEAD_CAM:
+        for name, sign in (("head_left", 1), ("head_right", -1)):
+            path = f"{ROBOT_ROOT}/link_head_2/{name}"
+            _camera(stage, path, _look_at_matrix(HEAD_MOUNT + np.array([0.0, sign * HEAD_BASELINE / 2, 0.0]), [1, 0, 0], [0, 0, 1]))
+            cams[name] = path
 
     _cuboid(stage, "/World/Table", TABLE_CENTER, TABLE_SIZE, (0.6, 0.5, 0.4), static_collider=True)
     friction = _friction_material(stage)

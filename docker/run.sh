@@ -207,7 +207,7 @@ echo ""
 # Simulator settings (see README "Run options"), passed only when set on the host.
 RBY1_ENV_ARGS=()
 for var in RBY1_SERVO_PROFILE RBY1_FF_DELAY RBY1_PHYSICS_DEVICE RBY1_FRICTION_MODEL RBY1_FRICTION_VELOCITY_EPS \
-           RBY1_PD_VELOCITY_WINDOW RBY1_UDP_INLINE_RECV RBY1_TIMING_LOG RBY1_REALTIME RBY1_CALIB_TARGET; do   # (RBY1_CALIB_TARGET=1: the HW7 R/B/Y spheres, see src/rby1_vision.py)
+           RBY1_PD_VELOCITY_WINDOW RBY1_UDP_INLINE_RECV RBY1_TIMING_LOG RBY1_REALTIME RBY1_CALIB_TARGET RBY1_HEAD_CAM; do   # (RBY1_CALIB_TARGET=1: the HW7 R/B/Y spheres; RBY1_HEAD_CAM=1: a stereo rig on the head, see src/rby1_vision.py)
     if [[ -n "${!var:-}" ]]; then
         RBY1_ENV_ARGS+=(-e "${var}=${!var}")
     fi
