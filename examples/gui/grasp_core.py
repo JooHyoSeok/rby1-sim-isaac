@@ -48,6 +48,7 @@ R_FRONT = np.column_stack([[0, -1, 0], [0, 0, 1], [-1, 0, 0]]).astype(float)  # 
 TORSO = np.array([0.0, 1.0, -2.0, 1.0, 0.0, 0.0])
 READY = np.array([0.0, 0.0, 0.0, -1.8, 0.0, 0.3, -1.57])      # the left arm takes the same values (checked with forward kinematics: same hand orientation,
 PARK = np.zeros(7)                                                # camera on the back of the hand); the arm that is not working hangs at its side
+GRIP_TORQUE = 20.0   # gripper current limit in the current-based position mode (the library's loop uses 5)
 HOLDING_CLOSENESS = (0.2, 0.85)  # gripper closeness range of a closed hand with the 5 cm box between the fingers (about 0.5)
 
 
@@ -156,6 +157,8 @@ class GraspRobot:
         assert self.gripper.initialize()
         self.gripper.homing()
         self.gripper.start()
+        time.sleep(0.5)       # the library's loop writes its own torque limit (5) once at its start; a box with the hand turned pushed a finger open at that limit
+        self.gripper.bus.group_sync_write_send_torque([(i, GRIP_TORQUE) for i in self.gripper.GRIPPER_IDS])
         self.gripper.set_open()
         self.dyn = self.robot.get_dynamics()
         self.fks = {s: self.dyn.make_state(["base", f"ee_{s}"], rby.Model_A().robot_joint_names) for s in C.ARMS}
@@ -288,15 +291,6 @@ class GraspRobot:
                 if "expired" not in str(exc) or attempt:
                     raise
                 self.stream = None   # a stream that sat idle (between two tasks) expires: open a new one and send again
-
-    def _stream_both(self, poses):
-        """Whole-body Cartesian targets for both ee frames at once: poses = {"right": 4x4, "left": 4x4} in the base frame."""
-        rby = self.rby
-        cart = (rby.CartesianCommandBuilder().set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1.0)).set_minimum_time(0.3))
-        for side, T in poses.items():
-            cart.add_target("base", f"ee_{side}", T, 0.3, 1.0, 1.0)
-        self._send_stream(rby.RobotCommandBuilder().set_command(rby.ComponentBasedCommandBuilder().set_body_command(
-            rby.BodyCommandBuilder().set_command(cart)).set_mobility_command(self._mobility_hold())))
 
     def _mobility_hold(self):
         """Zero planar velocity for the wheels, sent along with every arm and torso command: the unbraked base rolls away otherwise (it drifted 17 cm and 6
@@ -542,83 +536,76 @@ class GraspRobot:
         P = K.all_points(q)
         return min(float(np.linalg.norm(P[f"right_{a}"] - P[f"left_{b}"])) for a in ("elbow", "forearm") for b in ("elbow", "forearm"))
 
-    @staticmethod
-    def _rotvec(R):
-        c = float(np.clip((np.trace(R) - 1) / 2, -1.0, 1.0))
-        a = np.arccos(c)
-        if a < 1e-9:
-            return np.zeros(3)
-        v = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
-        return v / np.linalg.norm(v) * a if a > np.pi - 1e-3 else v / (2 * np.sin(a)) * a
+    def _sdk_fk(self, q7, side):
+        """ee pose of `side` for arm joints q7 (the other joints as they are now), by the SDK's own forward kinematics: arm_ik.solve plans with it."""
+        q = np.array(self.robot.get_state().position)
+        i0 = 8 if side == "right" else 15
+        q[i0:i0 + 7] = q7
+        with self._fk_lock:
+            fk = self.fks[side]
+            fk.set_q(q)
+            self.dyn.compute_forward_kinematics(fk)
+            return self.dyn.compute_transformation(fk, 0, 1)
 
-    @staticmethod
-    def _rodrigues(r):
-        a = np.linalg.norm(r)
-        if a < 1e-12:
-            return np.eye(3)
-        k = r / a
-        K_ = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-        return np.eye(3) + np.sin(a) * K_ + (1 - np.cos(a)) * K_ @ K_
+    def _arm_q(self):
+        pos = np.array(self.robot.get_state().position)
+        return {"right": pos[8:15], "left": pos[15:22]}
 
-    def _interp(self, T0, T1, a):
-        T = np.eye(4)
-        T[:3, :3] = self._rodrigues(a * self._rotvec(T1[:3, :3] @ T0[:3, :3].T)) @ T0[:3, :3]
-        T[:3, 3] = T0[:3, 3] + a * (T1[:3, 3] - T0[:3, 3])
-        return T
-
-    def _move_both(self, T1, seconds):
-        """Both ee frames to the poses T1 ({arm: 4x4}) on one smooth ramp, streamed; stops when the arms come closer than MIN_ARM_GAP."""
-        T0 = {s: self.ee_pose(s) for s in T1}
-        t0 = time.time()
-        while time.time() - t0 < seconds:
-            t_loop = time.time()
-            self._check()
-            self._stream_both({s: self._interp(T0[s], T1[s], smoothstep((t_loop - t0) / seconds)) for s in T1})
-            gap = self._arm_gap()
+    def _joint_pair(self, q_to, seconds, name):
+        """Both arms to the joint values q_to ({arm: 7 values}) in one straight joint-space move. Refused when the arms would come closer than MIN_ARM_GAP on the way."""
+        import arm_ik
+        q0 = self._arm_q()
+        for a in np.linspace(0.0, 1.0, 13):
+            gap = arm_ik.arm_gap(*(q0[s] + a * (np.asarray(q_to[s]) - q0[s]) for s in C.ARMS))
             if gap < self.MIN_ARM_GAP:
-                raise TaskError(f"the arms come {gap * 100:.1f} cm apart (limit {self.MIN_ARM_GAP * 100:.0f} cm): stopped")
-            self._tick(t_loop)
-        for _ in range(int(1.5 * RATE)):                            # hold the end pose until it is reached
-            t_loop = time.time()
-            self._check()
-            self._stream_both(T1)
-            self._tick(t_loop)
+                raise TaskError(f"{name}: the arms would come {gap * 100:.1f} cm apart on the way (limit {self.MIN_ARM_GAP * 100:.0f} cm)")
+        rby = self.rby
+        body = rby.BodyComponentBasedCommandBuilder()
+        for side, setter in (("right", body.set_right_arm_command), ("left", body.set_left_arm_command)):
+            setter(rby.ArmCommandBuilder().set_command(rby.JointPositionCommandBuilder().set_minimum_time(seconds).set_position(np.asarray(q_to[side], float))))
+        self._joint_move(body, name)
 
-    def meet(self, x=0.48, z=1.0, gap=C.MEET_GRASP_BACK, variant="forward", seconds=8.0):
-        """Both hands to the mating plane in front of the chest (scene_config.meet_targets), whatever they hold. Both arms are made ready first (an arm
-        that holds a box stays as it is, so pick the two parts first). Come back with unmeet."""
+    def meet(self, x=0.48, z=1.0, gap=C.MEET_GRASP_BACK, variant="forward", seconds=16.0):
+        """Both hands to the mating plane in front of the chest (scene_config.meet_targets), whatever they hold. Both arms are made ready first (an arm that holds a
+        box stays as it is, so pick the two parts first). The joint values come from inverse kinematics started at the joints the arms have now (arm_ik.py) and the
+        arms go there in one straight joint-space move: the whole-body Cartesian IK of the robot turned the right wrist the long way round and the box fell. Come back with unmeet."""
         def body():
+            import arm_ik
             if variant not in C.MEET_VARIANTS:
                 raise TaskError(f"unknown hand orientation '{variant}' ({', '.join(C.MEET_VARIANTS)})")
             self._activate("right", park_other=False)
             self._activate("left", park_other=False)
             tg = C.meet_targets(x, z, gap, variant)
-            T1 = {}
-            for s in C.ARMS:
-                T1[s] = np.eye(4)
-                T1[s][:3, :3], T1[s][:3, 3] = np.array(tg[s]["R"]), tg[s]["ee"]
+            q_now, q_to = self._arm_q(), {}
+            for s_ in C.ARMS:
+                q = arm_ik.solve(s_, np.array(tg[s_]["grasp"]), np.array(tg[s_]["R"]), seeds=8, q_start=q_now[s_], fk=self._sdk_fk)
+                if q is None:
+                    raise TaskError(f"the {s_} hand cannot reach the meeting pose x {x:.2f}, z {z:.2f} ({variant})")
+                q_to[s_] = q
+            change = {s_: float(np.degrees(np.abs(q_to[s_] - q_now[s_]).max())) for s_ in C.ARMS}
+            if max(change.values()) > 150.0:
+                raise TaskError(f"the meeting pose needs a joint to turn {max(change.values()):.0f} degrees: refused")
             if self.meeting is None:
-                self.meeting = {s: self.ee_pose(s) for s in C.ARMS}
-            self.event(f"both hands to the meeting pose x {x:.2f}, z {z:.2f} ({variant}, grasp points {(2 * C.MEET_GRASP_BACK + gap) * 100:.0f} cm apart)")
-            self._move_both(T1, seconds)
-            err = {s: (float(np.linalg.norm(self.ee_pose(s)[:3, 3] - T1[s][:3, 3])) * 1000,
-                       float(np.degrees(np.linalg.norm(self._rotvec(T1[s][:3, :3] @ self.ee_pose(s)[:3, :3].T))))) for s in C.ARMS}
-            self.event("meeting pose reached: " + ", ".join(f"{s} {e[0]:.1f} mm / {e[1]:.1f} deg" for s, e in err.items()) + f"; arms {self._arm_gap() * 100:.0f} cm apart")
+                self.meeting = {s_: q_now[s_].copy() for s_ in C.ARMS}
+            self.event(f"both hands to the meeting pose x {x:.2f}, z {z:.2f} ({variant}, grasp points {(2 * C.MEET_GRASP_BACK + gap) * 100:.0f} cm apart): "
+                       f"largest joint change right {change['right']:.0f} deg, left {change['left']:.0f} deg")
+            self._joint_pair(q_to, seconds, "meet")
+            err = {}
+            for s_ in C.ARMS:
+                T = self.ee_pose(s_)
+                ang = np.degrees(np.arccos(np.clip((np.trace(np.array(tg[s_]["R"]) @ T[:3, :3].T) - 1) / 2, -1.0, 1.0)))
+                err[s_] = (float(np.linalg.norm(T[:3, 3] - np.array(tg[s_]["ee"]))) * 1000, float(ang))
+            self.event("meeting pose reached: " + ", ".join(f"{s_} {e[0]:.1f} mm / {e[1]:.1f} deg" for s_, e in err.items()) + f"; arms {self._arm_gap() * 100:.0f} cm apart")
             self.cmd_tip = self.tip()
         self._run("meet", body)
 
-    def unmeet(self, seconds=8.0):
-        """Both hands back to where they were before the first meet."""
+    def unmeet(self, seconds=16.0):
+        """Both arms back to the joint values they had before the first meet."""
         def body():
             if not self.meeting:
                 raise TaskError("the hands are not at the meeting pose")
             self.event("both hands back from the meeting pose")
-            apart = {}
-            for s_, sign in (("right", -1.0), ("left", 1.0)):         # first pull the hands apart along the part axis: turning them back with the parts
-                apart[s_] = self.ee_pose(s_).copy()                   # next to each other would swing the parts into each other
-                apart[s_][1, 3] += sign * 0.10
-            self._move_both(apart, 3.0)
-            self._move_both(self.meeting, seconds)
+            self._joint_pair(self.meeting, seconds, "unmeet")
             self.meeting = None
             pos = np.array(self.robot.get_state().position)           # the arms are not where the holds of the last task say
             self.hold = {s: dict(zip([f"{s}_arm_{i}" for i in range(7)], pos[8:15] if s == "right" else pos[15:22])) for s in C.ARMS}

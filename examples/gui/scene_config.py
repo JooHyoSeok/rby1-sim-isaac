@@ -288,8 +288,12 @@ def table_spot(name, boxes, top=TABLE_TOP, table_center=TABLE_CENTER, table_size
 # EE_BEHIND_GRASP behind the grasp point along the tool axis (fingertips 5 mm past the grasp point, ee 0.12 behind the fingertips).
 MEET_GRASP_BACK = 0.03
 EE_BEHIND_GRASP = 0.115
-MEET_VARIANTS = {"forward": ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0)),
-                 "inward": ((math.cos(math.radians(30)), math.sin(math.radians(30)), 0.0), (0.0, 0.0, 1.0))}    # tool axis and closing axis of the RIGHT hand
+# (tool axis of the RIGHT hand, closing axis of the right hand, closing axis of the left hand). The hands turn from READY (closing axis sideways) by 90 degrees about the tool
+# axis; the wrist roll joint (arm_6, READY -1.57 rad, limits +-2.71) decides which way each arm can: offline IK (examples/assembly) puts the right arm's joints 58 degrees
+# from READY with the closing axis up and 149 degrees with it down (the same turn for both arms made the right hand drop its box in the simulator), the left arm's 62
+# degrees with it down.
+MEET_VARIANTS = {"forward": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, -1.0)),
+                 "inward": ((math.cos(math.radians(30)), math.sin(math.radians(30)), 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, -1.0))}
 
 
 def _cross(a, b):
@@ -299,9 +303,9 @@ def _cross(a, b):
 def meet_targets(x, z, gap=MEET_GRASP_BACK, variant="forward"):
     """{"right"/"left": {"R": 3x3 rows (the ee orientation), "ee": [x, y, z] (the ee origin), "grasp": [x, y, z]}} for the two hands holding their parts at
     (x, 0, z) in the base frame, the parts `gap` apart (0 = seated)."""
-    tool, closing = MEET_VARIANTS[variant]
+    tool, closing_right, closing_left = MEET_VARIANTS[variant]
     out = {}
-    for side, sign in (("right", 1.0), ("left", -1.0)):
+    for side, sign, closing in (("right", 1.0, closing_right), ("left", -1.0, closing_left)):
         t, c = (tool[0], sign * tool[1], tool[2]), (closing[0], sign * closing[1], closing[2])
         zc = (-t[0], -t[1], -t[2])
         yc = _cross(zc, c)

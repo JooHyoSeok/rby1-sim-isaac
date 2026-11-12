@@ -427,7 +427,7 @@ class FakeRobot:
         if traj.get("unit") == "bad":
             raise grasp_core.TaskError("the trajectory is not safe: test")
 
-    def meet(self, x=0.48, z=1.0, gap=0.03, variant="forward", seconds=8.0):
+    def meet(self, x=0.48, z=1.0, gap=0.03, variant="forward", seconds=12.0):
         self.calls.append(("meet", x, z, gap, variant))
 
     def unmeet(self):
@@ -868,7 +868,7 @@ def test_arms():
 
 
 def test_meet():
-    """Two hands at the mating plane: the target poses, the pose ramp, the arms that stay as they are, and what is refused while the hands meet."""
+    """Two hands at the mating plane: the target poses, the inverse kinematics that reaches them, the arms that stay as they are, and what is refused while the hands meet."""
     for variant in C.MEET_VARIANTS:
         t = C.meet_targets(0.48, 1.0, 0.03, variant)
         for side in C.ARMS:
@@ -882,13 +882,18 @@ def test_meet():
     inw = C.meet_targets(0.48, 1.0, 0.03, "inward")
     assert -np.array(inw["right"]["R"])[1, 2] > 0.4 and -np.array(inw["left"]["R"])[1, 2] < -0.4               # turned towards each other
     assert np.isclose(C.meet_targets(0.48, 1.0, 0.0, "forward")["right"]["grasp"][1], -0.03)                   # seated: 6 cm between the grasp points
-    # the ramp between two ee poses: the ends, and half way is half the rotation
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent"))
+    import arm_ik
+    for variant in C.MEET_VARIANTS:                       # both hands reach the pose from READY, within limits, without turning any joint the long way round
+        tg = C.meet_targets(0.48, 1.0, 0.03, variant)
+        for side in C.ARMS:
+            q = arm_ik.solve(side, np.array(tg[side]["grasp"]), np.array(tg[side]["R"]), q_start=arm_ik.READY)
+            assert q is not None, (variant, side)
+            assert np.degrees(np.abs(q - arm_ik.READY).max()) < 100, (variant, side, np.degrees(q - arm_ik.READY).round())
+            T = arm_ik.fk_ee(q, side)
+            assert np.allclose(T[:3, :3], np.array(tg[side]["R"]), atol=0.03) and np.allclose(T[:3, :3] @ arm_ik.GRASP_EE + T[:3, 3], tg[side]["grasp"], atol=0.002)
+            assert np.allclose(T[:3, 3], tg[side]["ee"], atol=0.003), "the ee origin the targets give is the one the solver reaches"
     r = object.__new__(grasp_core.GraspRobot)
-    T0, T1 = np.eye(4), np.eye(4)
-    T1[:3, :3], T1[:3, 3] = r._rodrigues(np.array([0.0, 0.0, 1.2])), [0.2, 0.0, 0.1]
-    assert np.allclose(r._interp(T0, T1, 0.0), T0) and np.allclose(r._interp(T0, T1, 1.0), T1)
-    mid = r._interp(T0, T1, 0.5)
-    assert np.allclose(r._rotvec(mid[:3, :3]), [0.0, 0.0, 0.6]) and np.allclose(mid[:3, 3], [0.1, 0.0, 0.05])
     # an arm that holds a box is not parked when the other one gets ready; a free one is
     r.events, r.side, r.squatted, r.ready, r.seeded, r.stash, r.meeting = [], "right", True, {"right": True, "left": True}, True, {"left": "yellow"}, None
     r.event = r.events.append

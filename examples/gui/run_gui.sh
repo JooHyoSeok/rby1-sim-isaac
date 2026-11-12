@@ -88,7 +88,7 @@ echo "perception running"
 say "3/4 executor service (simulator container)"
 for f in vision.py servo.py; do docker cp "${HERE}/../vservo/${f}" "${SIM}:/tmp/${f}"; done
 for f in scene_config.py base_motion.py grasp_core.py servo_server.py; do docker cp "${HERE}/${f}" "${SIM}:/tmp/${f}"; done
-for f in kinematics.py safety.py rby1_kinematics.json; do docker cp "${HERE}/../agent/${f}" "${SIM}:/tmp/${f}"; done   # the joint-trajectory check
+for f in kinematics.py arm_ik.py safety.py rby1_kinematics.json; do docker cp "${HERE}/../agent/${f}" "${SIM}:/tmp/${f}"; done   # the joint-trajectory check
 docker cp "${REPO}/examples/gripper_example.py" "${SIM}:/tmp/gripper_example.py"
 docker exec -d "${SIM}" bash -c "/isaac-sim/python.sh /tmp/servo_server.py > /tmp/server.log 2>&1"
 for ((i = 0; i < 60; i++)); do

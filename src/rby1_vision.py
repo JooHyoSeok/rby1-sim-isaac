@@ -58,7 +58,7 @@ TABLE_TOP = 0.72
 # A thin top without legs: a solid box down to the floor gets hit by the hand when it swings up from the hanging pose.
 TABLE_CENTER, TABLE_SIZE = (0.88, 0.0, TABLE_TOP - 0.02), (0.6, 0.8, 0.04)  # front edge x=0.58
 OBJECT_SIZE = (0.05, 0.05, 0.08)  # tall enough to be grasped above the table surface
-OBJECT_MASS, OBJECT_FRICTION = 0.1, 1.5  # a dynamic rigid body the gripper can lift
+OBJECT_MASS, OBJECT_FRICTION = 0.1, float(os.environ.get("RBY1_OBJECT_FRICTION", "1.5"))  # a dynamic rigid body the gripper can lift (friction: object and fingers)
 # The side landmarks sit 2.5 cm off the faces (1.3 cm clear of them): at 3.7 cm the stereo camera on the far side saw them half hidden
 # behind the box edge, which biased their centroids (found in a stack of three).
 OBJECT_LANDMARKS = [(0.0, 0.0, 0.052), (0.037, 0.0, 0.0), (-0.02, 0.05, 0.0), (-0.02, -0.05, 0.0)]

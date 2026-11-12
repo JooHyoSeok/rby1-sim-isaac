@@ -162,7 +162,7 @@ class Server:
         elif cmd == "drive":
             r.drive(forward=msg.get("forward", 0.0), turn_deg=msg.get("turn_deg", 0.0), home=msg.get("home", False))
         elif cmd == "meet":
-            r.meet(msg.get("x", 0.48), msg.get("z", 1.0), msg.get("gap", C.MEET_GRASP_BACK), msg.get("variant", "forward"), msg.get("seconds", 8.0))
+            r.meet(msg.get("x", 0.48), msg.get("z", 1.0), msg.get("gap", C.MEET_GRASP_BACK), msg.get("variant", "forward"), msg.get("seconds", 16.0))
         elif cmd == "unmeet":
             r.unmeet()
         elif cmd == "home":
